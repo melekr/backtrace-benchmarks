@@ -1,0 +1,85 @@
+# Metric catalogue. Every result row's `metric` must match an id here (wildcards `<abi>`, `<slice>`, `<stage>`, `<N>` are literal segments in rows).
+# class: det = deterministic exact gate | pair = in-job paired timing gate | warn = report only | trend = Tier-2 only, never a gate
+# lowerIsBetter applies to all metrics here.
+version: 1
+sdks:
+  android:
+    A0.aar_bytes:              { unit: bytes, class: det,  tier: tier0, desc: "Published AAR size (Maven Central)" }
+    A0.classes_jar_bytes:      { unit: bytes, class: det,  tier: tier0, desc: "classes.jar inside the AAR" }
+    A0.so_bytes.<abi>:         { unit: bytes, class: det,  tier: tier0, desc: "libbacktrace-native.so per ABI inside the AAR" }
+    A0.so_total_bytes:         { unit: bytes, class: det,  tier: tier0, desc: "Sum of all native libraries in the AAR" }
+    A1.init.<stage>:           { unit: ms,    class: warn, desc: "Main-thread init stage: client | native | metrics | anr | breadcrumbs" }
+    A1.init.total:             { unit: ms,    class: pair, desc: "Main-thread init total (first SDK call to last stage end)" }
+    A1b.init.native.largeapk:  { unit: ms,    class: pair, desc: "Native init stage with the 10k-entry APK fixture" }
+    A1b.zip_reader_symbols:    { unit: count, class: det,  desc: "Forbidden ZIP-reader symbols seen in native init trace (must be 0)" }
+    A2.ttid:                   { unit: ms,    class: warn, desc: "Cold start timeToInitialDisplay (Macrobenchmark)" }
+    A2.ttfd:                   { unit: ms,    class: warn, desc: "Cold start timeToFullDisplay (reportFullyDrawn)" }
+    A3.apk_universal_bytes:    { unit: bytes, class: det,  desc: "Universal APK bytes (plain vs sdk, same job)" }
+    A3.install_bytes.<abi>:    { unit: bytes, class: det,  desc: "bundletool get-size total per device spec (download size estimate)" }
+    A3.dex_method_refs:        { unit: count, class: det,  desc: "apkanalyzer dex references" }
+    A3.so_bytes.<abi>:         { unit: bytes, class: det,  desc: "Native libs in the built APK per ABI" }
+    A4.send.e2e_ms:            { unit: ms,    class: pair, desc: "send(Exception) to OnServerResponse callback, stub server" }
+    A4.send.caller_ms:         { unit: ms,    class: pair, desc: "send(Exception) caller-thread blocking time" }
+    A4.send.alloc_count:       { unit: count, class: det,  desc: "Microbenchmark allocationCount per send" }
+    A4.send.write_bytes:       { unit: bytes, class: det,  desc: "/proc/self/io write_bytes delta per send" }
+    A5.breadcrumb.add_us:      { unit: us,    class: pair, desc: "addBreadcrumb latency" }
+    A5.breadcrumb.add_native_us: { unit: us,  class: pair, desc: "addBreadcrumb latency with native integration on" }
+    A5.breadcrumb.write_bytes_per_1k: { unit: bytes, class: det, desc: "Bytes written per 1000 breadcrumbs" }
+    A6.db_start.seeded_<N>:    { unit: ms,    class: pair, desc: "BacktraceDatabase.start with N pending records" }
+    A7.idle.cpu_ms:            { unit: ms,    class: trend, desc: "CPU time of SDK-owned threads over 120 s idle" }
+    A7.idle.pss_kb:            { unit: bytes, class: trend, desc: "PSS after 120 s idle (bytes)" }
+    A7.threads_after_init:     { unit: count, class: det,  desc: "Thread count delta after full init" }
+    A7.timer_wakeups_120s:     { unit: count, class: det,  desc: "SDK timer firings over 120 s" }
+    A8.crash.native_dump_ms:   { unit: ms,    class: pair, desc: "nativeCrash() to minidump file mtime" }
+    A8.crash.relaunch_upload_ms: { unit: ms,  class: pair, desc: "Relaunch to pending-report arrival at mock (minus fixed latency)" }
+    A10.crash.java_handler_ms: { unit: ms,    class: pair, desc: "Uncaught Java exception handler entry to process death (immediate 200)" }
+    A10.crash.java_handler_delayed_ms: { unit: ms, class: warn, desc: "Same with 2 s delayed 200 (shows latch)" }
+  apple:
+    C0.xcframework_slice_bytes.<slice>: { unit: bytes, class: det, tier: tier0, desc: "Backtrace.framework binary per slice from release archive" }
+    C0.crashreporter_slice_bytes.<slice>: { unit: bytes, class: det, tier: tier0, desc: "CrashReporter.framework binary per slice" }
+    C0.archive_bytes:          { unit: bytes, class: det,  tier: tier0, desc: "Archive_XCFrameworks_<ver>.tar.gz bytes" }
+    C1.init.<stage>:           { unit: ms,    class: warn, desc: "Main-thread init stage: client | breadcrumbs | (repository | pendingCrash | crashReporter | watcher when exposed)" }
+    C1.init.total:             { unit: ms,    class: pair, desc: "BacktraceClient(configuration:) wall time on main thread" }
+    C2.launch_ms:              { unit: ms,    class: warn, desc: "XCTApplicationLaunchMetric duration" }
+    C3.app_binary_bytes:       { unit: bytes, class: det,  desc: "Main executable bytes, unsigned generic iOS archive" }
+    C3.app_bundle_bytes:       { unit: bytes, class: det,  desc: ".app bundle bytes" }
+    C3.app_zip_bytes:          { unit: bytes, class: det,  desc: "zip of .app as download proxy" }
+    C3.thinning_download_bytes.<variant>: { unit: bytes, class: det, desc: "App Thinning Size Report compressed size (signed lane only)" }
+    C4.send.caller_ms:         { unit: ms,    class: pair, desc: "send(error) caller-thread blocking time (XCTClockMetric)" }
+    C4.send.e2e_ms:            { unit: ms,    class: pair, desc: "send(error) to completion callback, local stub" }
+    C4.send.cpu_ms:            { unit: ms,    class: warn, desc: "XCTCPUMetric cpu time per send" }
+    C4.send.memory_peak_kb:    { unit: bytes, class: warn, desc: "XCTMemoryMetric physical peak (bytes)" }
+    C5.breadcrumb.add_us.retained_<N>: { unit: us, class: pair, desc: "addBreadcrumb latency with N retained crumbs" }
+    C5.breadcrumb.file_bytes:  { unit: bytes, class: det,  desc: "bt-breadcrumbs-0 bytes after run" }
+    C6.repository_open.seeded_<N>: { unit: ms, class: pair, desc: "Init with N pending records in the Core Data store" }
+    C6.migration_v1_v2_ms:     { unit: ms,    class: warn, desc: "2.2.0 opening a 2.1.0 store" }
+    C7.idle.cpu_ms:            { unit: ms,    class: trend, desc: "CPU of backtrace.* threads over 120 s idle" }
+    C7.threads_after_init:     { unit: count, class: det,  desc: "Thread count delta after init" }
+    C7.timer_wakeups_120s:     { unit: count, class: det,  desc: "Watcher timer firings over 120 s (5 s => 24 +/- 1)" }
+    C8.crash.ingest_ms:        { unit: ms,    class: pair, desc: "handlePendingCrashes duration on relaunch after SIGSEGV" }
+    C8b.crash.handler_ms:      { unit: ms,    class: pair, desc: "Signal time to live_report plist mtime" }
+  unity:
+    U0.tgz_bytes:              { unit: bytes, class: det,  tier: tier0, desc: "OpenUPM tarball bytes" }
+    U0.native_bytes.<platform>.<abi>: { unit: bytes, class: det, tier: tier0, desc: "Native plugin bytes per platform/abi inside the tarball" }
+    U0.managed_source_bytes:   { unit: bytes, class: det,  tier: tier0, desc: "Runtime/**/*.cs bytes" }
+    U1.init.total:             { unit: ms,    class: warn, desc: "BacktraceClient.Initialize + Refresh wall time (editor PlayMode: warn only)" }
+    U1.init.gc_bytes:          { unit: bytes, class: det,  desc: "GC allocated during Initialize" }
+    U2.send.e2e_ms:            { unit: ms,    class: pair, desc: "Send(exception) to RequestHandler completion" }
+    U2.send.gc_bytes:          { unit: bytes, class: det,  desc: "GC allocated per Send" }
+    U2.tojson_ms:              { unit: ms,    class: pair, desc: "BacktraceData.ToJson() time" }
+    U2.perf.report_us:         { unit: us,    class: warn, desc: "SDK PerformanceStatistics performance.report" }
+    U2.perf.json_us:           { unit: us,    class: warn, desc: "SDK PerformanceStatistics performance.json" }
+    U2.perf.database_us:       { unit: us,    class: warn, desc: "SDK PerformanceStatistics performance.database" }
+    U2b.unhandled.e2e_ms:      { unit: ms,    class: pair, desc: "Unhandled exception log to RequestHandler" }
+    U3.log.per_call_us:        { unit: us,    class: pair, desc: "Debug.Log cost with capture, no breadcrumbs" }
+    U3.log.per_call_breadcrumbs_us: { unit: us, class: pair, desc: "Debug.Log cost with breadcrumbs enabled" }
+    U3.log.gc_bytes:           { unit: bytes, class: det,  desc: "GC per Debug.Log with capture" }
+    U4.player_bytes.<platform>: { unit: bytes, class: det, desc: "Player build bytes plain vs sdk, same editor run" }
+    U4.native_bytes.<platform>.<abi>: { unit: bytes, class: det, desc: "Native libs in the player" }
+    U5.breadcrumb.append_us:   { unit: us,    class: pair, desc: "Breadcrumb append latency incl. overflow rewrites" }
+    U5.db_reload.seeded_<N>:   { unit: ms,    class: pair, desc: "BacktraceDatabase.Reload with N records" }
+    U6.lateupdate_us:          { unit: us,    class: pair, desc: "BacktraceClient.LateUpdate + BacktraceDatabase.Update per frame" }
+    U7.player.ttid:            { unit: ms,    class: warn, desc: "Android player cold start" }
+    U7.player.native_init_ms:  { unit: ms,    class: pair, desc: "On-device native init in player" }
+    U8.crash.native_dump_ms:   { unit: ms,    class: pair, desc: "ForceCrash to Crashpad dump mtime" }
+    U8.crash.relaunch_upload_ms: { unit: ms,  class: pair, desc: "Relaunch to upload arrival at mock" }

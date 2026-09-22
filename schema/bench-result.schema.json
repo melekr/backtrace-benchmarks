@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/melekr/backtrace-benchmarks/schema/bench-result.schema.json",
+  "title": "bench-result.json written by a Backtrace benchmark app after one launch/run",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "sdk", "sdkVersion", "variant", "scenario", "appId", "stages", "totalMs"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "sdk": { "enum": ["android", "apple", "unity"] },
+    "sdkVersion": { "type": "string", "description": "Published version (3.14.0), 'local-SNAPSHOT', or git sha for HEAD" },
+    "source": { "enum": ["maven", "spm", "xcframework", "cocoapods", "openupm", "local"] },
+    "variant": { "enum": ["plain", "sdk", "sentinel"] },
+    "scenario": { "type": "string", "description": "default | largeapk | diag | seeded-<N> | busy | idle" },
+    "appId": { "type": "string", "description": "applicationId / bundle id / Unity product name actually launched" },
+    "platform": { "type": "string", "description": "android | ios | macos | tvos | unity-editor | unity-android | unity-ios" },
+    "process": {
+      "type": "object",
+      "properties": {
+        "pid": { "type": "integer" },
+        "startedAt": { "type": "string" },
+        "coldStart": { "type": "boolean" }
+      }
+    },
+    "stages": {
+      "type": "array",
+      "description": "Ordered SDK init stages timed with a monotonic clock on the thread that called the SDK",
+      "items": {
+        "type": "object",
+        "required": ["name", "ms"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "description": "client | native | metrics | anr | breadcrumbs | repository | pendingCrash | crashReporter | watcher | oom | refresh | database | ..." },
+          "ms": { "type": "number", "minimum": 0 },
+          "thread": { "type": "string" },
+          "ok": { "type": "boolean", "description": "false when the stage threw or returned failure; row is then invalid" }
+        }
+      }
+    },
+    "totalMs": { "type": "number", "minimum": 0, "description": "Wall time from first SDK call to last stage end on the calling thread" },
+    "counters": {
+      "type": "object",
+      "description": "Deterministic counts sampled after init (thread count, timers, bytes written, mock requests received...)",
+      "additionalProperties": { "type": "number" }
+    },
+    "samples": {
+      "type": "object",
+      "description": "Optional in-process micro results keyed by metric id, each an array of per-iteration values in the metric unit",
+      "additionalProperties": { "type": "array", "items": { "type": "number" } }
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "os": { "type": "string" }, "osVersion": { "type": "string" }, "model": { "type": "string" },
+        "abi": { "type": "string" }, "cpuCores": { "type": "integer" }, "isEmulator": { "type": "boolean" }
+      }
+    },
+    "errors": { "type": "array", "items": { "type": "string" } }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/melekr/backtrace-benchmarks/schema/result.schema.json",
+  "title": "One benchmark result row (one metric, one variant, one scenario, one round)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "sdk", "sdkVersion", "source", "variant", "scenario", "metric", "unit", "value", "stats", "env", "run"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "sdk": { "enum": ["android", "apple", "unity"] },
+    "platform": { "type": "string" },
+    "sdkVersion": { "type": "string" },
+    "source": { "enum": ["maven", "spm", "xcframework", "cocoapods", "openupm", "local"] },
+    "variant": { "enum": ["plain", "sdk", "sentinel"] },
+    "scenario": { "type": "string" },
+    "metric": { "type": "string", "description": "Metric id from schema/metrics.yml, e.g. A1.init.total" },
+    "unit": { "enum": ["bytes", "ms", "us", "count", "ops_per_s", "percent", "ratio"] },
+    "value": { "type": "number", "description": "Summary value used for comparison (median unless metric says otherwise)" },
+    "samples": { "type": "array", "items": { "type": "number" } },
+    "round": { "type": "integer", "minimum": 0 },
+    "position": { "type": "integer", "minimum": 0, "description": "Position of this variant inside the round (0-based) to detect order effects" },
+    "stats": {
+      "type": "object",
+      "required": ["n"],
+      "additionalProperties": false,
+      "properties": {
+        "n": { "type": "integer", "minimum": 1 },
+        "median": { "type": "number" }, "mean": { "type": "number" }, "mad": { "type": "number" },
+        "p95": { "type": "number" }, "min": { "type": "number" }, "max": { "type": "number" }, "cov": { "type": "number" },
+        "sampleKind": { "enum": ["perLaunch", "perIteration", "measurementAverage", "exact"] }
+      }
+    },
+    "env": {
+      "type": "object",
+      "required": ["fingerprint"],
+      "additionalProperties": true,
+      "properties": {
+        "fingerprint": { "type": "string", "description": "sha256 over the sorted env fields that must match for rows to be comparable" },
+        "runner": { "type": "string" }, "os": { "type": "string" }, "nproc": { "type": "integer" },
+        "xcode": { "type": "string" }, "agp": { "type": "string" }, "gradle": { "type": "string" }, "jdk": { "type": "string" },
+        "unity": { "type": "string" }, "emulator": { "type": "string" }, "simulator": { "type": "string" },
+        "device": { "type": "string" }, "cpuLocked": { "type": "boolean" }, "tier": { "enum": ["tier0", "tier1", "tier2"] }
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": ["id", "ts"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string" }, "sha": { "type": "string" }, "workflow": { "type": "string" },
+        "ts": { "type": "string" }, "url": { "type": "string" }
+      }
+    },
+    "valid": { "type": "boolean", "default": true },
+    "notes": { "type": "string" }
+  }
+}
