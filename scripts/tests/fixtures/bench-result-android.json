@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1, "sdk": "android", "sdkVersion": "3.14.0", "source": "maven", "variant": "sdk", "scenario": "default",
+  "appId": "io.backtrace.bench.sdk.v3_14_0", "platform": "android",
+  "process": {"pid": 1234, "startedAt": "2026-09-22T10:00:00.000Z", "coldStart": true},
+  "stages": [
+    {"name": "client", "ms": 31.5, "thread": "main", "ok": true},
+    {"name": "native", "ms": 12.2, "thread": "main", "ok": true},
+    {"name": "metrics", "ms": 3.1, "thread": "main", "ok": true},
+    {"name": "anr", "ms": 0.4, "thread": "main", "ok": true},
+    {"name": "breadcrumbs", "ms": 9.8, "thread": "main", "ok": true}
+  ],
+  "totalMs": 57.0,
+  "counters": {"mock_requests": 2, "threads_after_init": 6},
+  "device": {"os": "android", "osVersion": "14", "model": "sdk_gphone64_x86_64", "abi": "x86_64", "cpuCores": 4, "isEmulator": true}
+}

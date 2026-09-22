@@ -1,0 +1,4 @@
+# Optional. Every script falls back to the standard library (scripts/_yamlmini.py, the
+# built-in validator in validate_rows.py) when these are not importable.
+pyyaml==6.0.3
+jsonschema==4.26.0
