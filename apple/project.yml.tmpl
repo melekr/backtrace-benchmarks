@@ -1,0 +1,104 @@
+# XcodeGen spec template for the Apple benchmark project.
+# Rendered by apple/scripts/render_project.py into apple/project.yml (gitignored). Do not edit project.yml by hand.
+# Placeholders: double-brace names are substituted; #BLOCK ... /BLOCK sections repeat per variant.
+# source={{source}} version={{version}} variants={{variants_csv}} conditions={{conditions}}
+name: BenchApp
+options:
+  minimumXcodeGenVersion: "2.40.0"
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+  defaultConfig: Release
+configs:
+  Debug: debug
+  Release: release
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1"
+    SUPPORTS_MACCATALYST: "NO"
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGNING_ALLOWED: "NO"
+    DEVELOPMENT_TEAM: ""
+    ENABLE_USER_SCRIPT_SANDBOXING: "YES"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    ENABLE_BITCODE: "NO"
+  configs:
+    Release:
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      SWIFT_COMPILATION_MODE: wholemodule
+      DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+      ENABLE_TESTABILITY: "NO"
+    Debug:
+      ENABLE_TESTABILITY: "YES"
+{{packages_block}}
+targets:
+{{#APP_TARGETS}}
+  BenchApp-{{variant}}:
+    type: application
+    platform: iOS
+    sources:
+      - path: BenchApp
+    info:
+      path: Generated/Info-BenchApp-{{variant}}.plist
+      properties:
+        CFBundleDisplayName: Bench {{variant}}
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        BTBenchVariant: {{variant}}
+        BTBenchSDKVersion: "{{version}}"
+        BTBenchSource: {{source}}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.backtrace.bench.{{variant}}.v{{version_id}}
+        PRODUCT_NAME: BenchApp-{{variant}}
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) {{variant_conditions}}"
+{{app_dependencies}}
+    scheme:
+      gatherCoverageData: false
+      testTargets:
+{{scheme_test_targets}}
+  BenchAppUITests-{{variant}}:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: BenchAppUITests
+    dependencies:
+      - target: BenchApp-{{variant}}
+    info:
+      path: Generated/Info-BenchAppUITests-{{variant}}.plist
+      properties: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.backtrace.bench.uitests.{{variant}}.v{{version_id}}
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) {{variant_conditions}}"
+{{/APP_TARGETS}}
+{{#UNIT_TARGET}}
+  BenchUnitTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: BenchUnitTests
+      - path: BenchApp/Shared
+    dependencies:
+      - target: BenchApp-{{host}}
+{{unit_dependencies}}
+    info:
+      path: Generated/Info-BenchUnitTests.plist
+      properties: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.backtrace.bench.unittests.v{{version_id}}
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) {{conditions}}"
+{{/UNIT_TARGET}}

@@ -1,0 +1,8 @@
+# module-local ignores (root .gitignore already covers *.xcodeproj, Vendor/, build/, artifacts/, *.xcresult)
+project.yml
+Generated/
+build/
+Vendor/
+artifacts/
+out/
+*.xcresult
