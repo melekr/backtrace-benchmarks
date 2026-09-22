@@ -146,5 +146,51 @@ class FingerprintTests(unittest.TestCase):
         self.assertNotEqual(json.loads(a)["fingerprint"], json.loads(c)["fingerprint"])
 
 
+
+class ParseBenchResultExclusionTests(unittest.TestCase):
+    def _rows(self, extra):
+        d = tempfile.mkdtemp()
+        env = os.path.join(d, "env.json")
+        json.dump(synth.ENV, open(env, "w"))
+        out = os.path.join(d, "rows.jsonl")
+        r = run([os.path.join(SCRIPTS, "parse_bench_result.py"), os.path.join(HERE, "fixtures", "bench-result-android.json"), "--sdk", "android",
+                 "--sdk-version", "3.14.0", "--variant", "sdk", "--env", env, "--expect-mock-requests", "2", "--out", out] + list(extra))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return [json.loads(l) for l in open(out)], r.stderr
+
+    def test_exclude_metrics_glob(self):
+        rows, _ = self._rows([])
+        self.assertTrue(any(r["metric"].startswith("A1.") for r in rows))
+        rows, err = self._rows(["--exclude-metrics", "A1.*"])
+        self.assertFalse(any(r["metric"].startswith("A1.") for r in rows), [r["metric"] for r in rows])
+        self.assertIn("dropped", err)
+
+    def test_exclude_metrics_present_in_platform_rows(self):
+        rows, _ = self._rows([])
+        covered = os.path.join(tempfile.mkdtemp(), "rows-platform.jsonl")
+        first = rows[0]["metric"]
+        synth.write(covered, [rows[0]])
+        rows2, _ = self._rows(["--exclude-metrics-in", covered])
+        self.assertNotIn(first, [r["metric"] for r in rows2])
+        self.assertEqual(len(rows2), len(rows) - 1)
+
+
+class LaneReportTests(unittest.TestCase):
+    def test_lane_failures_lead_the_comment(self):
+        out = tempfile.mkdtemp()
+        os.makedirs(os.path.join(out, "rows"))
+        os.makedirs(os.path.join(out, "report"))
+        rows = synth.timing_rows("A4.send.e2e_ms", "ms", 5.0, "3.13.0", "sdk", seed=1) + synth.timing_rows("A4.send.e2e_ms", "ms", 5.0, "3.14.0", "sdk", seed=2)
+        synth.write(os.path.join(out, "rows", "micro.jsonl"), rows)
+        open(os.path.join(out, "report", "lane-failures.md"), "w").write("- `android macro 3.14.0 (sdk, default)`: exit code 1 after 2 attempts\n")
+        r = subprocess.run(["bash", os.path.join(SCRIPTS, "ci", "lane_report_pr.sh"), "android", "3.13.0", "3.14.0", out],
+                           capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        md = open(os.path.join(out, "report", "pr-comment.md")).read()
+        self.assertTrue(md.startswith("### Lane failures"), md[:200])
+        self.assertIn("android macro 3.14.0", md)
+        self.assertIn("A4.send.e2e_ms", md)
+        self.assertIn("### Lane failures", r.stdout)
+
 if __name__ == "__main__":
     unittest.main()

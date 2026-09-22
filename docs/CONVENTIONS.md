@@ -66,9 +66,11 @@ Each platform ships `<platform>/scripts/bench_<platform>.sh`. Common flags: `--v
 
 Exit codes: `0` ok, `1` failure, `4` unsupported cell (e.g. tag does not compile on this toolchain). Drivers never print secrets and never contact production hosts.
 
+Sub-lane failures: `scripts/ci/lane_*.sh` (via `lane_common.sh`) retry a failed per-version `micro`/`macro` pass once, record it in `out/<sdk>/report/lane-failures.md`, continue with the remaining cells and exit `1` only after every other pass has run. The report and artifact steps still execute, and the PR comment then starts with a **Lane failures** section explaining which metrics are missing.
+
 ## 8. Raw output layout
 
-`out/<sdk>/<version>/<variant>/<scenario>/round-<R>/pos-<P>/` containing platform raw files: `bench-result-<i>.json`, `*-benchmarkData.json`, `*.xcresult/`, `PerformanceTestResults.json`, `logcat.txt`, `stdout.txt`, `env.json`. Platform-specific raw parsers live with their platform and emit `rows.jsonl`: `android/scripts/benchmarkdata_to_rows.py` (micro and macro `*-benchmarkData.json`), `apple/scripts/xcresult_to_rows.py` (`.xcresult`), `unity/scripts/perf_results_to_rows.py` (`PerformanceTestResults.json`). The shared `scripts/parse_bench_result.py` converts `bench-result.json` files from every platform. `size` subcommands and `scripts/fetch_artifacts.py` emit rows directly.
+`out/<sdk>/<version>/<variant>/<scenario>/round-<R>/pos-<P>/` containing platform raw files: `bench-result-<i>.json`, `*-benchmarkData.json`, `*.xcresult/`, `PerformanceTestResults.json`, `logcat.txt`, `stdout.txt`, `env.json`. Platform-specific raw parsers live with their platform and emit `rows.jsonl`: `android/scripts/benchmarkdata_to_rows.py` (micro and macro `*-benchmarkData.json`), `apple/scripts/xcresult_to_rows.py` (`.xcresult`), `unity/scripts/perf_results_to_rows.py` (`PerformanceTestResults.json`). The shared `scripts/parse_bench_result.py` converts `bench-result.json` files from every platform. `size` subcommands and `scripts/fetch_artifacts.py` emit rows directly. For Apple `micro` passes the XCTest metrics from the `.xcresult` are authoritative; `parse_bench_result.py --exclude-metrics 'C1.*' --exclude-metrics-in rows-platform.jsonl` then adds only counters and metrics the xcresult lacks (test-host init stages are not app cold starts and are dropped).
 
 ## 9. Result rows
 
@@ -87,7 +89,7 @@ Schema: `schema/result.schema.json`; metric ids and units: `schema/metrics.yml`.
 ## 11. Hermeticity per platform
 
 - Android: `okhttp3.mockwebserver.MockWebServer` bound to `127.0.0.1` inside the app process (the bench apps declare `android:usesCleartextTraffic="true"`, otherwise Android rejects plain HTTP even on loopback); submission URL `http://127.0.0.1:<port>/post?format=json&token=<64 hex>`; metrics via a `BacktraceCredentials` subclass overriding `getUniverseName()`/`getSubmissionToken()` and `BacktraceMetricsSettings(creds, "http://127.0.0.1:<port>/api", 0)`; micro paths use `setOnRequestHandler`; SDK logger `OFF` except scenario `diag`; crash-path lanes use a fixed 50 ms mock latency and subtract it.
-- Apple: `NWListener` HTTP stub on `127.0.0.1` in the app/test process; `NSAppTransportSecurity/NSAllowsLocalNetworking = YES`; `allowsAttachingDebugger = true`; `reportsPerMin = 100000`; metrics disabled in default lanes.
+- Apple: `NWListener` HTTP stub on `127.0.0.1` in the app/test process: `Content-Length` and chunked bodies, `Expect: 100-continue`, a 30 s idle timeout per connection (counted as incomplete), graceful close after every response (FIN, never a reset); `NSAppTransportSecurity/NSAllowsLocalNetworking = YES`; `allowsAttachingDebugger = true`; `reportsPerMin = 100000`; metrics disabled in default lanes. In-process tests wait through `XCTWaiter` (run loop), never on a semaphore held by the main thread, and record a metric only when every send completed `ok` with exactly one stub request; otherwise the failure lands in `errors` and the pass is reported as failed.
 - Unity: `BacktraceClient.RequestHandler` stub for editor lanes; server URL on a non-`backtrace.io` host so metrics self-disable, keeping `format=json` and a 64-character `token=`; `ReportPerMin` set to 100000; player lanes reach the runner mock through `adb reverse tcp:<port> tcp:<port>`.
 
 ## 12. Testing the harness itself

@@ -9,6 +9,7 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cmd="${1:-}"; shift || true
 VERSIONS="${VERSIONS:?}"; SOURCE="${SOURCE:-maven}"; ROUNDS="${ROUNDS:-3}"; ITERATIONS="${ITERATIONS:-15}"
 METRIC_SETS="${METRIC_SETS:-size,init,micro,macro}"; SCENARIO="${SCENARIO:-default}"; OUT="${OUT:-out/android}"
+mkdir -p "$OUT/rows" "$OUT/raw" "$OUT/report"; . "$repo/scripts/ci/lane_common.sh"
 RUN_ID="${GITHUB_RUN_ID:-local-$(date -u +%Y%m%dT%H%M%SZ)}"; ENV_JSON="${ENV_JSON:-env.json}"
 driver="$repo/android/scripts/bench_android.sh"; parser="$repo/android/scripts/benchmarkdata_to_rows.py"
 [ "$SOURCE" = "local" ] && [ -n "${LOCAL_VERSION:-}" ] && VERSIONS="$LOCAL_VERSION"
@@ -40,20 +41,24 @@ case "$cmd" in
       cp "$OUT/raw/init/rows.jsonl" "$OUT/rows/init.jsonl"
     fi
     for v in "${vlist[@]}"; do
+      # A failed pass is retried once, then recorded in report/lane-failures.md; the remaining cells still run.
       if has micro; then
         d="$OUT/raw/micro/$v"; mkdir -p "$d"
-        "$driver" run --metric-set micro --version "$v" --variant sdk --scenario "$SCENARIO" --source "$SOURCE" --serial "$serial" --out "$d"
-        python3 "$parser" "$d" --sdk-version "$v" --variant sdk --scenario "$SCENARIO" --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-platform.jsonl" || true
-        ls "$d"/bench-result*.json >/dev/null 2>&1 && python3 "$repo/scripts/parse_bench_result.py" "$d" --sdk android --sdk-version "$v" --variant sdk --scenario "$SCENARIO" --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-bench.jsonl" || true
-        cat "$d"/rows-*.jsonl >> "$OUT/rows/micro.jsonl" 2>/dev/null || true
+        if run_with_retry "android micro $v (sdk, $SCENARIO)" "$driver" run --metric-set micro --version "$v" --variant sdk --scenario "$SCENARIO" --source "$SOURCE" --serial "$serial" --out "$d"; then
+          python3 "$parser" "$d" --sdk-version "$v" --variant sdk --scenario "$SCENARIO" --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-platform.jsonl" || true
+          ls "$d"/bench-result*.json >/dev/null 2>&1 && python3 "$repo/scripts/parse_bench_result.py" "$d" --sdk android --sdk-version "$v" --variant sdk --scenario "$SCENARIO" --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-bench.jsonl" || true
+          cat "$d"/rows-*.jsonl >> "$OUT/rows/micro.jsonl" 2>/dev/null || true
+        fi
       fi
       if has macro; then
         d="$OUT/raw/macro/$v"; mkdir -p "$d"
-        "$driver" run --metric-set macro --version "$v" --variant sdk --scenario "$SCENARIO" --source "$SOURCE" --serial "$serial" --iterations "$ITERATIONS" --out "$d"
-        python3 "$parser" "$d" --sdk-version "$v" --variant sdk --scenario "$SCENARIO" --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-platform.jsonl" || true
-        cat "$d"/rows-*.jsonl >> "$OUT/rows/macro.jsonl" 2>/dev/null || true
+        if run_with_retry "android macro $v (sdk, $SCENARIO)" "$driver" run --metric-set macro --version "$v" --variant sdk --scenario "$SCENARIO" --source "$SOURCE" --serial "$serial" --iterations "$ITERATIONS" --out "$d"; then
+          python3 "$parser" "$d" --sdk-version "$v" --variant sdk --scenario "$SCENARIO" --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-platform.jsonl" || true
+          cat "$d"/rows-*.jsonl >> "$OUT/rows/macro.jsonl" 2>/dev/null || true
+        fi
       fi
     done
+    finish_lane
     ;;
   report)
     "$repo/scripts/ci/lane_report_pr.sh" android "$oldest" "$newest" "$OUT" "$SOURCE"

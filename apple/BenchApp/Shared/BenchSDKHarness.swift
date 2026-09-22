@@ -117,6 +117,9 @@ final class BenchSDKHarness {
         result.errors.append(contentsOf: errors)
         result.counters["mock_requests"] = Double(stub.requestCount)
         result.counters["mock_incomplete_requests"] = Double(stub.incompleteCount)
+        result.counters["mock_idle_timeouts"] = Double(stub.idleTimeoutCount)
+        result.counters["mock_chunked_requests"] = Double(stub.chunkedCount)
+        result.counters["mock_continue_replies"] = Double(stub.continueCount)
         result.counters["threads_before_init"] = Double(threadsBeforeInit)
         result.counters["threads_after_init"] = Double(threadsAfterInit)
         if threadsBeforeInit >= 0 && threadsAfterInit >= 0 {

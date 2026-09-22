@@ -12,6 +12,7 @@ driver="$repo/apple/scripts/bench_apple.sh"; parser="$repo/apple/scripts/xcresul
 IFS=',' read -r -a vlist <<< "$VERSIONS"; newest="${vlist[$((${#vlist[@]} - 1))]}"; oldest="${vlist[0]}"
 has() { case ",$METRIC_SETS," in *",$1,"*) return 0;; *) return 1;; esac; }
 mkdir -p "$OUT/rows" "$OUT/raw" "$OUT/report"
+. "$repo/scripts/ci/lane_common.sh"
 [ -f "$ENV_JSON" ] || "$repo/scripts/env_fingerprint.sh" --tier tier1 > "$ENV_JSON"
 udid="${SIM_UDID:-}"; dev=(); [ -n "$udid" ] && dev=(--udid "$udid")
 local_flag=(); [ "$SOURCE" = "local" ] && local_flag=(--local-path "$LOCAL_PATH")
@@ -42,17 +43,22 @@ run_all() {
     for v in "${vlist[@]}"; do
       d="$OUT/raw/micro/$v"; mkdir -p "$d"
       "$driver" prepare --version "$v" --source "$SOURCE" ${local_flag[@]+"${local_flag[@]}"} >/dev/null
-      "$driver" run --metric-set micro --version "$v" --variant sdk ${dev[@]+"${dev[@]}"} --out "$d"
-      python3 "$parser" "$d/micro.xcresult" --sdk-version "$v" --variant sdk --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-platform.jsonl" || true
-      ls "$d"/bench-result*.json >/dev/null 2>&1 && python3 "$repo/scripts/parse_bench_result.py" "$d" --sdk apple --sdk-version "$v" --variant sdk --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-bench.jsonl" || true
-      cat "$d"/rows-*.jsonl >> "$OUT/rows/micro.jsonl" 2>/dev/null || true
+      # A failed pass is retried once, then recorded in report/lane-failures.md; the remaining cells still run.
+      if run_with_retry "apple micro $v (sdk)" "$driver" run --metric-set micro --version "$v" --variant sdk ${dev[@]+"${dev[@]}"} --out "$d"; then
+        python3 "$parser" "$d/micro.xcresult" --sdk-version "$v" --variant sdk --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-platform.jsonl" || true
+        # XCTest metrics from the xcresult are authoritative; the self-reported file adds counters and anything the
+        # xcresult lacks. Test-host init stages are not app cold starts, so C1.* rows from this pass are dropped.
+        ls "$d"/bench-result*.json >/dev/null 2>&1 && python3 "$repo/scripts/parse_bench_result.py" "$d" --sdk apple --sdk-version "$v" --variant sdk --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" \
+          --exclude-metrics 'C1.*' --exclude-metrics-in "$d/rows-platform.jsonl" --out "$d/rows-bench.jsonl" || true
+        cat "$d"/rows-*.jsonl >> "$OUT/rows/micro.jsonl" 2>/dev/null || true
+      fi
     done
   fi
 }
 case "$cmd" in
   build) build_all;;
-  run) run_all;;
-  all) build_all; run_all;;
+  run) run_all; finish_lane;;
+  all) build_all; run_all; finish_lane;;
   thinning)
     "$driver" prepare --version "$newest" --source "$SOURCE" ${local_flag[@]+"${local_flag[@]}"} >/dev/null
     vid="v$(echo "$newest" | tr '.-' '__')"

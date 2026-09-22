@@ -10,7 +10,7 @@ local checkout.
 | Path | Purpose |
 |---|---|
 | `project.yml.tmpl` | XcodeGen spec template; rendered to `project.yml` (gitignored) by `scripts/render_project.py --source xcframework|spm|local --version V` |
-| `BenchApp/` | app sources; `BenchLaunch`/`BenchSDKHarness` run the staged init (`client`, `attributes`, `breadcrumbs`) inside `os_signpost` intervals and write `Documents/bt-bench-stages.json`; `BenchStub` is the 127.0.0.1 HTTP stub; compile conditions `BT_SDK`, `BT_GE_2_1`, `BT_GE_2_2` select code per version |
+| `BenchApp/` | app sources; `BenchLaunch`/`BenchSDKHarness` run the staged init (`client`, `attributes`, `breadcrumbs`) inside `os_signpost` intervals and write `Documents/bt-bench-stages.json`; `BenchStub` is the 127.0.0.1 HTTP stub (`Content-Length` and chunked bodies, `Expect: 100-continue`, 30 s idle timeout, graceful close); compile conditions `BT_SDK`, `BT_GE_2_1`, `BT_GE_2_2` select code per version |
 | `BenchAppUITests/` | `XCTApplicationLaunchMetric` + `XCTOSSignpostMetric` around `XCUIApplication().launch()`; iterations from `BT_ITERATIONS` |
 | `BenchUnitTests/` | in-process `measure()` with clock/CPU/memory metrics: `send(error)` end-to-end and caller-thread, `addBreadcrumb` at 10/100/1000 retained crumbs, thread counters; also writes `Documents/bench-result.json` with per-iteration samples |
 | `scripts/bench_apple.sh` | driver (`prepare`, `build`, `install`, `run --metric-set init|micro`, `size`, `clean`); exit 4 when a version does not build on the current Xcode |

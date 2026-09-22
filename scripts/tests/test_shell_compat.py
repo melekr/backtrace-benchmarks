@@ -49,5 +49,23 @@ class ShellCompatTests(unittest.TestCase):
         self.assertIn("DRY: cp " + env, r.stdout, "--env must be reused instead of generating a new fingerprint")
 
 
+    @unittest.skipUnless(BASH32, "macOS /bin/bash (3.2) not available")
+    def test_lane_common_retries_and_records_under_bash32(self):
+        out = tempfile.mkdtemp()
+        script = (
+            'set -euo pipefail; OUT="$1"; . "$2"; n=0; flaky() { n=$((n+1)); [ "$n" -ge 2 ]; }; '
+            'run_with_retry "flaky pass" flaky && echo "flaky ok after $n"; '
+            'if run_with_retry "broken pass" false; then echo "unexpected"; fi; '
+            'echo "continued"; finish_lane'
+        )
+        r = subprocess.run([BASH32, "-c", script, "bash", out, os.path.join(REPO, "scripts/ci/lane_common.sh")], capture_output=True, text=True, cwd=REPO)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("flaky ok after 2", r.stdout)
+        self.assertIn("continued", r.stdout, "a failed pass must not abort the remaining passes")
+        failures = open(os.path.join(out, "report", "lane-failures.md")).read()
+        self.assertIn("broken pass", failures)
+        self.assertNotIn("flaky pass", failures)
+
+
 if __name__ == "__main__":
     unittest.main()

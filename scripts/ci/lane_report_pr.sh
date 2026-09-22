@@ -32,6 +32,13 @@ args=(pr --base "$OUT/report/rows-base.jsonl" --head "$OUT/report/rows-head.json
 set +e
 python3 "$repo/scripts/compare.py" "${args[@]}" >/dev/null; rc=$?   # the markdown is read back from --out below
 set -e
+# Passes that failed twice (scripts/ci/lane_common.sh) lead the comment so missing metrics are explained.
+fail_md="$OUT/report/lane-failures.md"
+if [ -s "$fail_md" ]; then
+  { echo "### Lane failures"; echo; echo "These passes failed twice and contributed no rows; the metrics below come from the passes that completed."; echo
+    cat "$fail_md"; echo; cat "$OUT/report/pr-comment.md"; } > "$OUT/report/pr-comment.md.tmp"
+  mv "$OUT/report/pr-comment.md.tmp" "$OUT/report/pr-comment.md"
+fi
 { echo "## $sdk: $older → $newer"; echo; cat "$OUT/report/pr-comment.md"; } 
 python3 "$repo/scripts/compare.py" "${args[@]}" --format json --out "$OUT/report/pr-comparison.json" >/dev/null 2>&1 || true
 exit $rc

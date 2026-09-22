@@ -17,6 +17,7 @@ launch, and hence the pooled row, as valid:false with a note.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import glob
 import json
 import os
@@ -168,6 +169,22 @@ def build_rows(pooled: Dict[str, Dict[str, Any]], problems: List[str], meta: Dic
     return rows
 
 
+def drop_metrics(pooled: Dict[str, Dict[str, Any]], patterns: List[str], rows_path: Optional[str]) -> List[str]:
+    """Remove pooled metric ids matching any glob in `patterns` (comma-separated, repeatable) or already present
+    in `rows_path` (a rows.jsonl written by a platform parser, which then takes precedence). Returns the ids dropped."""
+    globs = [g for arg in patterns for g in arg.split(",") if g]
+    covered = set()
+    if rows_path and os.path.exists(rows_path):
+        with open(rows_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip():
+                    covered.add(json.loads(line).get("metric"))
+    dropped = [mid for mid in pooled if mid in covered or any(fnmatch.fnmatchcase(mid, g) for g in globs)]
+    for mid in dropped:
+        del pooled[mid]
+    return dropped
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("paths", nargs="+", help="bench-result*.json files or directories containing them")
@@ -186,6 +203,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--sha")
     ap.add_argument("--expect-mock-requests", type=int)
     ap.add_argument("--keep-unknown-metrics", action="store_true")
+    ap.add_argument("--exclude-metrics", action="append", default=[],
+                    help="glob(s) of metric ids to drop, e.g. 'C1.*' (repeatable or comma-separated)")
+    ap.add_argument("--exclude-metrics-in", metavar="ROWS_JSONL",
+                    help="drop metric ids already present in this rows file (the platform parser's output wins)")
     ap.add_argument("--metrics", default=hc.METRICS_PATH)
     ap.add_argument("--out", help="rows.jsonl (default stdout)")
     ap.add_argument("--append", action="store_true")
@@ -198,6 +219,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     catalog = hc.load_metrics(args.metrics)
     try:
         pooled, problems, meta = collect(files, args.expect_mock_requests, catalog, args.sdk, args.keep_unknown_metrics)
+        dropped = drop_metrics(pooled, args.exclude_metrics, args.exclude_metrics_in)
+        if dropped:
+            print(f"parse_bench_result: dropped {len(dropped)} excluded metric(s): {sorted(dropped)}", file=sys.stderr)
         env = hc.load_env(args.env, tier=args.tier)
         rows = build_rows(pooled, problems, meta, args, env, catalog)
     except (ValueError, KeyError, json.JSONDecodeError) as exc:
