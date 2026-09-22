@@ -54,11 +54,11 @@ Every lane writes raw files under `out/…`, the parsers turn them into rows (`s
 |---|---|
 | Tier-0 size ladders, all three SDKs, full backfill windows | yes, 338 rows validate; AAR bytes match Maven Central |
 | Android: plain + SDK apps build against 3.14.0, 3.13.0, 3.8.4; micro/macro test APKs build | yes |
-| Android: cold-start lane (5/5 launches, mock saw both metrics events), micro lane (send, breadcrumbs) and Macrobenchmark lane (TTID + init trace sections, logcat echo) on a local arm64 API 36 emulator | yes, rows validate |
-| Apple: SwiftPM 2.2.0 project renders and builds for the simulator; in-process benchmarks (6 tests) and the launch lane (launch metric + init signpost, 10 launches) run and convert to rows | yes |
+| Android: cold-start, micro and Macrobenchmark lanes on a local arm64 API 36 emulator; the full `lane_android.sh` (plain + 3.13.0 + 3.14.0 + sentinel interleaved round, report with noise floor) verified under Bash 3.2 | yes, rows validate |
+| Apple: SwiftPM and XCFramework consumption both build; in-process benchmarks (6 tests) and the launch lane run; the full `lane_apple.sh` (plain + versions + sentinel, size/init/micro, report) verified under Bash 3.2 | yes |
 | Unity: packages resolve on Unity 6 (performance package 3.5.0); all 9 PlayMode benchmarks pass and convert to rows | yes |
 | Harness self-tests (thresholds, rows, gates, parser, fingerprint) | 13 pass |
-| GitHub workflows | YAML validated; not yet executed in Actions |
+| GitHub Actions, first runs (2026-09-22) | `bench-tier0-size` and `probe` passed; `bench-android` and `bench-apple` failed on harness bugs fixed the same day (Bash 3.2 empty-array expansions on macOS runners, a fatal parser call on cold-start directories, and `xcframework` mode not vendoring the release archive). Probe result: Cocoa 2.1.0 and 2.2.0 build from SwiftPM on both Xcode 16 (`macos-15`) and Xcode 26 (`macos-26`); Android 3.13.0 and 3.14.0 resolve on AGP 8.13 |
 
 ## Layout
 

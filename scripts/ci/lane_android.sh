@@ -36,7 +36,7 @@ case "$cmd" in
     if has init; then
       "$repo/scripts/run_ab_rounds.sh" --sdk android --driver "$driver" --parser "$parser" --versions "$VERSIONS" --plain --sentinel \
         --rounds "$ROUNDS" --iterations "$ITERATIONS" --metric-set init --scenario "$SCENARIO" --source "$SOURCE" \
-        --expect-mock-requests 2 --device "$serial" --run-id "$RUN_ID" --out "$OUT/raw/init"
+        --expect-mock-requests 2 --device "$serial" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$OUT/raw/init"
       cp "$OUT/raw/init/rows.jsonl" "$OUT/rows/init.jsonl"
     fi
     for v in "${vlist[@]}"; do

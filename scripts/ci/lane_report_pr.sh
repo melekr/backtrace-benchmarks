@@ -30,7 +30,7 @@ args=(pr --base "$OUT/report/rows-base.jsonl" --head "$OUT/report/rows-head.json
 [ "${GATE:-0}" = "1" ] && args+=(--gate)
 [ "$older" = "$newer" ] && args=(overhead --plain "$OUT/report/rows-plain.jsonl" --head "$OUT/report/rows-head.jsonl" --format md --out "$OUT/report/pr-comment.md")
 set +e
-python3 "$repo/scripts/compare.py" "${args[@]}"; rc=$?
+python3 "$repo/scripts/compare.py" "${args[@]}" >/dev/null; rc=$?   # the markdown is read back from --out below
 set -e
 { echo "## $sdk: $older → $newer"; echo; cat "$OUT/report/pr-comment.md"; } 
 python3 "$repo/scripts/compare.py" "${args[@]}" --format json --out "$OUT/report/pr-comparison.json" >/dev/null 2>&1 || true

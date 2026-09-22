@@ -117,6 +117,8 @@ def main():
     if out is not sys.stdout:
         out.close()
     print("benchmarkdata_to_rows: %d file(s), %d rows" % (seen, len(rows)), file=sys.stderr)
+    if seen == 0:
+        return 0  # nothing to convert (e.g. a cold-start directory); not an error
     return 0 if rows else 1
 
 

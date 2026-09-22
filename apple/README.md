@@ -40,4 +40,9 @@ local-networking exception, and metrics are never enabled in the default lanes (
   `xcresult_to_rows.py` produced 7 valid rows.
 - Launch lane (`BenchAppUITests`, 10 launches): `XCTApplicationLaunchMetric` 1252 ms median on the simulator and the
   `bt.init` signpost 56.8 ms median, consistent with the app's own per-launch stage files (client 51–60 ms, attributes
-  about 0.9 ms, breadcrumbs about 2 ms). Size lane and the signed thinning lane are wired but were not executed in this session.
+  about 0.9 ms, breadcrumbs about 2 ms).
+- Full lane (`scripts/ci/lane_apple.sh all` + `report`, XCFramework mode, plain + 2.2.0 + sentinel, 3 launches): plain-vs-SDK
+  overhead on the simulator: cold launch +45 ms (+3.9 %), init 58 ms, `.app` bundle +1.64 MB (+22 KB main binary, the rest is
+  the embedded framework), zip +495 KB, +1 thread. XCFramework-built binaries measure slower than SwiftPM-built ones
+  (breadcrumb add 0.43 ms vs 0.30 ms), so a ladder must use one consumption mode throughout. The signed thinning lane is
+  wired but was not executed.

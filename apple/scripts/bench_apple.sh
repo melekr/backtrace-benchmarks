@@ -15,6 +15,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 apple_dir="$(cd "$here/.." && pwd)"
 repo="$(cd "$apple_dir/.." && pwd)"
 cmd="${1:-}"; shift || true
+mkdir -p "$apple_dir/build"
 version="2.2.0" source="xcframework" local_path="" variants="plain,sdk,sentinel" variant="sdk" udid="${SIM_UDID:-}" out=""
 metric_set="init" iterations=10 env_json="" run_id="local" round=0 position=0 scenario="default" crash=""
 while [ $# -gt 0 ]; do
@@ -30,7 +31,7 @@ done
 version_id="v$(echo "$version" | tr '.-' '__')"
 bundle_id="io.backtrace.bench.$variant.$version_id"
 project="$apple_dir/BenchApp.xcodeproj"
-dd="$apple_dir/build/dd"
+dd="$apple_dir/build/dd-$version_id"   # per-version build products: two SDK versions never overwrite each other
 log() { echo "bench_apple.sh[$variant $version]: $*"; }
 pick_udid() {
   if [ -n "$udid" ]; then echo "$udid"; return; fi
@@ -43,9 +44,27 @@ pick_udid() {
   echo "$any"
 }
 app_path() { echo "$dd/Build/Products/Release-iphonesimulator/BenchApp-$variant.app"; }
+# Prefer the .xctestrun produced by build-for-testing for this version so the test run cannot pick up another
+# version's products even if the rendered project has since moved on; fall back to the project + scheme.
+testrun_args() {
+  local v="$1" f
+  f=$(ls -t "$dd"/Build/Products/BenchApp-"$v"_iphonesimulator*.xctestrun 2>/dev/null | head -1 || true)
+  if [ -n "$f" ]; then printf -- '-xctestrun %q' "$f"; else printf -- '-project %q -scheme %q -configuration Release' "$project" "BenchApp-$v"; fi
+}
 
 case "$cmd" in
   prepare)
+    if [ "$source" = "xcframework" ]; then
+      # Vendor the published release archive for this version; a version without a public archive is an unsupported cell.
+      set +e
+      python3 "$here/fetch_xcframework.py" --version "$version" --artifacts-dir "$apple_dir/artifacts" --vendor-dir "$apple_dir/Vendor" >"$apple_dir/build/fetch-$version_id.log" 2>&1
+      rc=$?; set -e
+      if [ $rc -ne 0 ]; then log "no usable XCFramework archive for $version"; tail -5 "$apple_dir/build/fetch-$version_id.log" >&2; exit 4; fi
+      [ -d "$apple_dir/Vendor/$version/Backtrace.xcframework" ] || { log "archive for $version lacks Backtrace.xcframework"; exit 4; }
+    fi
+    # A build graph cached while the vendored frameworks were absent keeps failing with "no XCFramework found";
+    # dropping the cached graph (not the compiled objects) makes reruns evaluate the dependencies again.
+    rm -rf "$dd/Build/Intermediates.noindex/XCBuildData"
     args=(--source "$source" --version "$version" --variants "$variants")
     [ -n "$local_path" ] && args+=(--local-path "$local_path")
     python3 "$here/render_project.py" "${args[@]}"
@@ -68,7 +87,11 @@ case "$cmd" in
     log "built $(app_path)"
     ;;
   install)
-    u=$(pick_udid); xcrun simctl install "$u" "$(app_path)"; log "installed $bundle_id on $u"
+    u=$(pick_udid)
+    # Fresh app container per job: a previous run of the same identity (possibly another consumption mode) must
+    # not leave stage files or SDK state behind.
+    xcrun simctl uninstall "$u" "$bundle_id" >/dev/null 2>&1 || true
+    xcrun simctl install "$u" "$(app_path)"; log "installed $bundle_id on $u (fresh container)"
     ;;
   run)
     [ -n "$out" ] || { echo "run needs --out" >&2; exit 1; }
@@ -79,11 +102,13 @@ case "$cmd" in
         # file on every launch, so the file is copied after the run and the per-launch values come from the
         # signpost metric in the xcresult plus the app's own JSON (last launch) for stage names.
         # xcodebuild forwards environment to the test runner only with the TEST_RUNNER_ prefix.
+        container=$(xcrun simctl get_app_container "$u" "$bundle_id" data 2>/dev/null || true)
+        if [ -n "$container" ]; then rm -f "$container"/Documents/bt-bench-stages*.json "$container"/Documents/bench-result*.json; fi
         export BT_ITERATIONS="$iterations" TEST_RUNNER_BT_ITERATIONS="$iterations"
         [ -n "$crash" ] && export BT_BENCH_CRASH=1 TEST_RUNNER_BT_BENCH_CRASH=1
         set +e
-        xcodebuild test-without-building -project "$project" -scheme "BenchApp-$variant" -configuration Release \
-          -destination "platform=iOS Simulator,id=$u" -derivedDataPath "$dd" -only-testing:"BenchAppUITests-$variant" \
+        xcodebuild test-without-building $(testrun_args "$variant") -destination "platform=iOS Simulator,id=$u" \
+          -derivedDataPath "$dd" -only-testing:"BenchAppUITests-$variant" \
           -resultBundlePath "$out/launch.xcresult" >"$out/xcodebuild-launch.log" 2>&1
         rc=$?; set -e
         container=$(xcrun simctl get_app_container "$u" "$bundle_id" data 2>/dev/null || true)
@@ -98,8 +123,8 @@ case "$cmd" in
       micro)
         [ "$variant" != "plain" ] || { log "micro lane needs the sdk variant"; exit 1; }
         set +e
-        xcodebuild test-without-building -project "$project" -scheme "BenchApp-$variant" -configuration Release \
-          -destination "platform=iOS Simulator,id=$u" -derivedDataPath "$dd" -only-testing:BenchUnitTests \
+        xcodebuild test-without-building $(testrun_args "$variant") -destination "platform=iOS Simulator,id=$u" \
+          -derivedDataPath "$dd" -only-testing:BenchUnitTests \
           -resultBundlePath "$out/micro.xcresult" >"$out/xcodebuild-micro.log" 2>&1
         rc=$?; set -e
         container=$(xcrun simctl get_app_container "$u" "$bundle_id" data 2>/dev/null || true)

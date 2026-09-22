@@ -20,9 +20,9 @@ local_flag=(); [ "$SOURCE" = "local" ] && local_flag=(--local-path "$LOCAL_PATH"
 # per round by run_ab_rounds.sh, which re-renders through the driver's prepare step.
 build_all() {
   for v in "${vlist[@]}"; do
-    "$driver" prepare --version "$v" --source "$SOURCE" "${local_flag[@]}"
+    "$driver" prepare --version "$v" --source "$SOURCE" ${local_flag[@]+"${local_flag[@]}"}
     for variant in plain sdk sentinel; do
-      set +e; "$driver" build --version "$v" --variant "$variant" "${dev[@]}" --out "$OUT/raw/build-$v"; rc=$?; set -e
+      set +e; "$driver" build --version "$v" --variant "$variant" ${dev[@]+"${dev[@]}"} --out "$OUT/raw/build-$v"; rc=$?; set -e
       [ $rc -eq 4 ] && { echo "unsupported: $v"; break; }
       [ $rc -eq 0 ] || exit $rc
       if has size && { [ "$variant" != "plain" ] || [ "$v" = "$newest" ]; }; then
@@ -35,14 +35,14 @@ build_all() {
 run_all() {
   if has init; then
     "$repo/scripts/run_ab_rounds.sh" --sdk apple --driver "$driver" --parser "$parser" --versions "$VERSIONS" --plain --sentinel \
-      --rounds "$ROUNDS" --iterations "$ITERATIONS" --metric-set init --source "$SOURCE" ${udid:+--device "$udid"} --run-id "$RUN_ID" --out "$OUT/raw/init"
+      --rounds "$ROUNDS" --iterations "$ITERATIONS" --metric-set init --source "$SOURCE" ${udid:+--device "$udid"} --env "$ENV_JSON" --run-id "$RUN_ID" --out "$OUT/raw/init"
     cp "$OUT/raw/init/rows.jsonl" "$OUT/rows/init.jsonl"
   fi
   if has micro; then
     for v in "${vlist[@]}"; do
       d="$OUT/raw/micro/$v"; mkdir -p "$d"
-      "$driver" prepare --version "$v" --source "$SOURCE" "${local_flag[@]}" >/dev/null
-      "$driver" run --metric-set micro --version "$v" --variant sdk "${dev[@]}" --out "$d"
+      "$driver" prepare --version "$v" --source "$SOURCE" ${local_flag[@]+"${local_flag[@]}"} >/dev/null
+      "$driver" run --metric-set micro --version "$v" --variant sdk ${dev[@]+"${dev[@]}"} --out "$d"
       python3 "$parser" "$d/micro.xcresult" --sdk-version "$v" --variant sdk --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-platform.jsonl" || true
       ls "$d"/bench-result*.json >/dev/null 2>&1 && python3 "$repo/scripts/parse_bench_result.py" "$d" --sdk apple --sdk-version "$v" --variant sdk --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-bench.jsonl" || true
       cat "$d"/rows-*.jsonl >> "$OUT/rows/micro.jsonl" 2>/dev/null || true
@@ -54,7 +54,7 @@ case "$cmd" in
   run) run_all;;
   all) build_all; run_all;;
   thinning)
-    "$driver" prepare --version "$newest" --source "$SOURCE" "${local_flag[@]}" >/dev/null
+    "$driver" prepare --version "$newest" --source "$SOURCE" ${local_flag[@]+"${local_flag[@]}"} >/dev/null
     vid="v$(echo "$newest" | tr '.-' '__')"
     "$repo/scripts/ci/apple_thinning.sh" --project "$repo/apple/BenchApp.xcodeproj" --scheme BenchApp-sdk --bundle-id "io.backtrace.bench.sdk.$vid" \
       --sdk-version "$newest" --variant sdk --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$OUT/rows/thinning-sdk.jsonl"

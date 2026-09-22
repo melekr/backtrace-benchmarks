@@ -6,7 +6,7 @@
 #                    [--plain] [--sentinel] [--rounds 3] [--iterations N] [--metric-set init]
 #                    [--scenario default] [--source maven|xcframework|spm|openupm|local]
 #                    [--local-path DIR] [--parser PATH] [--expect-mock-requests N]
-#                    [--device ID] [--env-args "--agp 8.13.2 --jdk 17"] [--run-id ID]
+#                    [--device ID] [--env FILE | --env-args "--agp 8.13.2 --jdk 17"] [--run-id ID]
 #                    --out DIR [--dry-run]
 #
 # Layout (docs/CONVENTIONS.md section 8): <out>/<sdk>/<version>/<variant>/<scenario>/round-<R>/pos-<P>/
@@ -15,7 +15,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 sdk="" driver="" versions="" plain=0 sentinel=0 rounds=3 iterations="" metric_set="init"
-scenario="default" source="" local_path="" parser="" expect_mock="" device="" env_args=""
+scenario="default" source="" local_path="" parser="" expect_mock="" device="" env_args="" env_file=""
 run_id="" out="" dry_run=0
 
 while [ $# -gt 0 ]; do
@@ -35,6 +35,7 @@ while [ $# -gt 0 ]; do
     --expect-mock-requests) expect_mock="$2"; shift 2 ;;
     --device) device="$2"; shift 2 ;;
     --env-args) env_args="$2"; shift 2 ;;
+    --env) env_file="$2"; shift 2 ;;
     --run-id) run_id="$2"; shift 2 ;;
     --out) out="$2"; shift 2 ;;
     --dry-run) dry_run=1; shift ;;
@@ -78,7 +79,10 @@ run_cmd() {
 
 mkdir -p "$out"
 env_json="$out/env.json"
-if [ "$dry_run" = 1 ]; then
+if [ -n "$env_file" ]; then
+  # Reuse the job's env.json so every row of the job shares one fingerprint (size rows, init rows, micro rows).
+  if [ "$dry_run" = 1 ]; then printf 'DRY: cp %q %q\n' "$env_file" "$env_json"; else cp "$env_file" "$env_json"; fi
+elif [ "$dry_run" = 1 ]; then
   printf 'DRY: bash %q --tier tier1 %s --out %q\n' "$here/env_fingerprint.sh" "$env_args" "$env_json"
 else
   # shellcheck disable=SC2086
@@ -87,20 +91,20 @@ fi
 
 rows="$out/rows.jsonl"
 : > "$rows" 2>/dev/null || true
-declare -A unsupported=()
+unsupported=" "   # space-separated "<variant>@<version>" specs (Bash 3.2 has no associative arrays)
 
 # ---- phase 1: prepare/build/install every variant once ------------------------------------
 log "plan: sdk=$sdk variants=${variants[*]} rounds=$rounds metric-set=$metric_set scenario=$scenario out=$out"
 for spec in "${variants[@]}"; do
   variant="${spec%@*}"; version="${spec#*@}"
   vout="$out/$sdk/$version/$variant/$scenario"
-  common=(--version "$version" --source "$source" --variant "$variant" --scenario "$scenario" --out "$vout" "${device_flag[@]}" "${local_flag[@]}")
+  common=(--version "$version" --source "$source" --variant "$variant" --scenario "$scenario" --out "$vout" ${device_flag[@]+"${device_flag[@]}"} ${local_flag[@]+"${local_flag[@]}"})
   for step in prepare build install; do
     set +e
     run_cmd "$driver" "$step" "${common[@]}"
     rc=$?
     set -e
-    if [ "$rc" = 4 ]; then log "unsupported cell: $spec ($step exit 4); skipping"; unsupported["$spec"]=1; break; fi
+    if [ "$rc" = 4 ]; then log "unsupported cell: $spec ($step exit 4); skipping"; unsupported="$unsupported$spec "; break; fi
     if [ "$rc" != 0 ]; then log "driver $step failed for $spec (exit $rc)"; exit 1; fi
   done
 done
@@ -112,22 +116,27 @@ for ((r = 1; r <= rounds; r++)); do
   for ((p = 0; p < n; p++)); do
     idx=$(( (p + shift_by) % n ))
     spec="${variants[$idx]}"
-    [ -n "${unsupported[$spec]:-}" ] && continue
+    case "$unsupported" in *" $spec "*) continue ;; esac
     variant="${spec%@*}"; version="${spec#*@}"
     rdir="$out/$sdk/$version/$variant/$scenario/round-$r/pos-$p"
     [ "$dry_run" = 1 ] || mkdir -p "$rdir"
     run_cmd "$driver" run --metric-set "$metric_set" --version "$version" --source "$source" --variant "$variant" \
-      --scenario "$scenario" --out "$rdir" --round "$r" --position "$p" "${device_flag[@]}" "${iter_flag[@]}" "${local_flag[@]}"
+      --scenario "$scenario" --out "$rdir" --round "$r" --position "$p" ${device_flag[@]+"${device_flag[@]}"} ${iter_flag[@]+"${iter_flag[@]}"} ${local_flag[@]+"${local_flag[@]}"}
     [ "$dry_run" = 1 ] || cp "$env_json" "$rdir/env.json"
     common_parse=(--sdk "$sdk" --sdk-version "$version" --source "$source" --variant "$variant" --scenario "$scenario"
                   --round "$r" --position "$p" --env "$env_json" --run-id "$run_id")
     if [ -n "$parser" ]; then
-      run_cmd python3 "$parser" "$rdir" "${common_parse[@]}" --out "$rdir/rows-platform.jsonl"
+      # The platform parser only applies to metric sets that produce its raw files (e.g. benchmarkData.json);
+      # "no rows" is not an error for the round.
+      run_cmd python3 "$parser" "$rdir" "${common_parse[@]}" --out "$rdir/rows-platform.jsonl" || log "platform parser: no rows for $rdir"
     fi
     mock_flag=()
-    [ -n "$expect_mock" ] && mock_flag=(--expect-mock-requests "$expect_mock")
+    if [ -n "$expect_mock" ]; then
+      # The plain app has no SDK and must see zero mock requests; sdk/sentinel expect the configured count.
+      if [ "$variant" = "plain" ]; then mock_flag=(--expect-mock-requests 0); else mock_flag=(--expect-mock-requests "$expect_mock"); fi
+    fi
     if [ "$dry_run" = 1 ] || ls "$rdir"/bench-result*.json >/dev/null 2>&1 || ls "$rdir"/bt-bench-stages*.json >/dev/null 2>&1; then
-      run_cmd python3 "$here/parse_bench_result.py" "$rdir" "${common_parse[@]}" "${mock_flag[@]}" --out "$rdir/rows-bench.jsonl"
+      run_cmd python3 "$here/parse_bench_result.py" "$rdir" "${common_parse[@]}" ${mock_flag[@]+"${mock_flag[@]}"} --out "$rdir/rows-bench.jsonl" || log "bench-result parser failed for $rdir"
     else
       log "no bench-result*.json in $rdir"
     fi
