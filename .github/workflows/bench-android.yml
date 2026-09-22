@@ -1,0 +1,161 @@
+name: bench-android
+
+# One job = one comparable ladder cell: plain + up to two SDK versions + sentinel, built, installed and run
+# interleaved on the same emulator. Comparisons never cross jobs.
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: "Up to two comma-separated SDK versions (older,newer)"
+        default: "3.13.0,3.14.0"
+      source:
+        description: "maven | local (local publishes sdk_repo@sdk_ref to mavenLocal)"
+        default: maven
+        type: choice
+        options: [maven, local]
+      sdk_repo:
+        default: backtrace-labs/backtrace-android
+      sdk_ref:
+        default: master
+      rounds:
+        default: "3"
+      iterations:
+        default: "15"
+      metric_sets:
+        description: "Comma-separated: size,init,micro,macro"
+        default: "size,init,micro,macro"
+      scenario:
+        default: default
+        type: choice
+        options: [default, largeapk, diag]
+  workflow_call:
+    inputs:
+      versions: { type: string, required: true }
+      source: { type: string, default: maven }
+      sdk_repo: { type: string, default: backtrace-labs/backtrace-android }
+      sdk_ref: { type: string, default: master }
+      rounds: { type: string, default: "3" }
+      iterations: { type: string, default: "15" }
+      metric_sets: { type: string, default: "size,init,micro,macro" }
+      scenario: { type: string, default: default }
+  schedule:
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.versions || 'nightly' }}
+  cancel-in-progress: false
+
+jobs:
+  ladder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      VERSIONS: ${{ inputs.versions || '3.13.0,3.14.0' }}
+      SOURCE: ${{ inputs.source || 'maven' }}
+      ROUNDS: ${{ inputs.rounds || '3' }}
+      ITERATIONS: ${{ inputs.iterations || '15' }}
+      METRIC_SETS: ${{ inputs.metric_sets || 'size,init,micro,macro' }}
+      SCENARIO: ${{ inputs.scenario || 'default' }}
+      API_LEVEL: "34"
+      OUT: out/android
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install harness requirements
+        run: python3 -m pip install --quiet -r scripts/requirements.txt
+      - name: Accept Android SDK licences
+        run: yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+
+      # source=local: publish the SDK checkout to mavenLocal with the SDK's own toolchain, then benchmark that version.
+      - name: Checkout SDK for local source
+        if: env.SOURCE == 'local'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.sdk_repo || 'backtrace-labs/backtrace-android' }}
+          ref: ${{ inputs.sdk_ref || 'master' }}
+          path: sdk-src
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: Publish SDK to mavenLocal
+        if: env.SOURCE == 'local'
+        run: |
+          set -euo pipefail
+          scripts/ci/publish_android_local.sh sdk-src
+          echo "LOCAL_VERSION=$(cat out/local-version.txt)" >> "$GITHUB_ENV"
+
+      - name: Environment fingerprint
+        run: scripts/env_fingerprint.sh --set tier=tier1 --set emulator="system-images;android-${API_LEVEL};google_apis;x86_64" --set agp=8.13.2 --set gradle=8.14.5 --set jdk=17 > env.json && cat env.json
+
+      - name: Build variants and measure size
+        run: scripts/ci/lane_android.sh build
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: AVD cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-${{ env.API_LEVEL }}-google_apis-x86_64-v1
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ env.API_LEVEL }}
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: false
+          script: echo "AVD snapshot created"
+      - name: Run ladder on emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ env.API_LEVEL }}
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          script: scripts/ci/lane_android.sh run
+
+      - name: Compare and summarize
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          scripts/ci/lane_android.sh report | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: rows-android-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            out/android/rows
+            out/android/report
+            env.json
+          if-no-files-found: warn
+          retention-days: 30
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: raw-android-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/android/raw
+          if-no-files-found: ignore
+          retention-days: 7

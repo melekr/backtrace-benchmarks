@@ -1,0 +1,80 @@
+name: probe
+
+# Which SDK version x toolchain cells build. Emits supported-cells-<toolchain>.json consumed by the ladder workflows.
+on:
+  workflow_dispatch:
+    inputs:
+      apple_versions:
+        default: "2.0.6,2.0.9,2.1.0,2.2.0"
+      android_versions:
+        default: "3.8.4,3.9.0,3.10.6,3.11.0,3.13.0,3.14.0"
+  schedule:
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe-apple:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            toolchain: xcode-26
+            source: spm
+          - runner: macos-26
+            toolchain: xcode-26
+            source: xcframework
+          - runner: macos-15
+            toolchain: xcode-16
+            source: spm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install XcodeGen
+        run: brew install xcodegen && xcodegen --version && xcodebuild -version
+      - name: Probe
+        env:
+          VERSIONS: ${{ inputs.apple_versions || '2.0.6,2.0.9,2.1.0,2.2.0' }}
+          SOURCE: ${{ matrix.source }}
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: scripts/probe_buildability.sh --sdk apple --driver apple/scripts/bench_apple.sh --versions "$VERSIONS" --source "$SOURCE" --toolchain "$TOOLCHAIN-$SOURCE" --out out/probe
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: supported-cells-apple-${{ matrix.toolchain }}-${{ matrix.source }}
+          path: out/probe
+          if-no-files-found: error
+  probe-android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+      - name: Probe
+        env:
+          VERSIONS: ${{ inputs.android_versions || '3.8.4,3.9.0,3.10.6,3.11.0,3.13.0,3.14.0' }}
+        run: scripts/probe_buildability.sh --sdk android --driver android/scripts/bench_android.sh --versions "$VERSIONS" --source maven --toolchain agp-8.13 --out out/probe
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: supported-cells-android-agp-8.13
+          path: out/probe
+          if-no-files-found: error

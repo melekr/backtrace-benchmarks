@@ -1,0 +1,142 @@
+name: bench-release-report
+
+# Release-over-release ladder: adjacent version pairs run as separate comparable jobs, then one report chains them
+# (ratios normalized to the oldest version). Optionally updates the `results` branch and the gh-pages series.
+on:
+  workflow_dispatch:
+    inputs:
+      sdk:
+        type: choice
+        options: [android, apple, unity]
+        default: android
+      versions:
+        description: "Full ladder, oldest first, comma-separated"
+        default: "3.8.4,3.9.0,3.10.6,3.11.0,3.13.0,3.14.0"
+      rounds:
+        default: "3"
+      publish:
+        description: "Commit rows + REPORT.md to the results branch and push the latest-release series to gh-pages"
+        type: boolean
+        default: false
+  repository_dispatch:
+    types: [sdk-release]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.sdk || github.event.client_payload.sdk }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      sdk: ${{ steps.plan.outputs.sdk }}
+      pairs: ${{ steps.plan.outputs.pairs }}
+      versions: ${{ steps.plan.outputs.versions }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: plan
+        env:
+          SDK: ${{ inputs.sdk || github.event.client_payload.sdk }}
+          VERSIONS: ${{ inputs.versions || github.event.client_payload.versions }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/plan_pairs.py --sdk "$SDK" --versions "$VERSIONS" >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
+  android:
+    needs: plan
+    if: needs.plan.outputs.sdk == 'android'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        pair: ${{ fromJson(needs.plan.outputs.pairs) }}
+    uses: ./.github/workflows/bench-android.yml
+    with:
+      versions: ${{ matrix.pair.pair }}
+      rounds: ${{ inputs.rounds || '3' }}
+
+  apple:
+    needs: plan
+    if: needs.plan.outputs.sdk == 'apple'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        pair: ${{ fromJson(needs.plan.outputs.pairs) }}
+    uses: ./.github/workflows/bench-apple.yml
+    with:
+      versions: ${{ matrix.pair.pair }}
+      rounds: ${{ inputs.rounds || '3' }}
+
+  unity:
+    needs: plan
+    if: needs.plan.outputs.sdk == 'unity'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        pair: ${{ fromJson(needs.plan.outputs.pairs) }}
+    uses: ./.github/workflows/bench-unity.yml
+    with:
+      version_a: ${{ matrix.pair.a }}
+      version_b: ${{ matrix.pair.b }}
+    secrets: inherit
+
+  report:
+    needs: [plan, android, apple, unity]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --quiet -r scripts/requirements.txt
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rows-*
+          path: out/collected
+          merge-multiple: false
+      - name: Render ladder report
+        env:
+          SDK: ${{ needs.plan.outputs.sdk }}
+          VERSIONS: ${{ needs.plan.outputs.versions }}
+        run: |
+          set -o pipefail
+          scripts/ci/lane_report.sh | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: report-${{ needs.plan.outputs.sdk }}-${{ github.run_id }}
+          path: out/report
+          if-no-files-found: error
+      - name: Publish to results branch
+        if: ${{ inputs.publish == true }}
+        env:
+          SDK: ${{ needs.plan.outputs.sdk }}
+        run: scripts/ci/publish_results.sh
+      - name: Push latest-release series to gh-pages
+        if: ${{ inputs.publish == true }}
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+        with:
+          tool: customSmallerIsBetter
+          output-file-path: out/report/gha-latest-release.json
+          benchmark-data-dir-path: bench/${{ needs.plan.outputs.sdk }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: "110%"
+          comment-on-alert: false
+          fail-on-alert: false
+          summary-always: true

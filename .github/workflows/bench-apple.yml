@@ -1,0 +1,129 @@
+name: bench-apple
+
+# One job = one comparable ladder cell on one simulator: plain + up to two SDK versions + sentinel, interleaved.
+# macOS minutes are expensive: nightly runs only the latest and previous release.
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: "Up to two comma-separated SDK versions (older,newer)"
+        default: "2.1.0,2.2.0"
+      source:
+        description: "xcframework (release archives) | spm (exact tag) | local"
+        default: xcframework
+        type: choice
+        options: [xcframework, spm, local]
+      sdk_repo:
+        default: backtrace-labs/backtrace-cocoa
+      sdk_ref:
+        default: master
+      runner:
+        default: macos-26
+        type: choice
+        options: [macos-26, macos-15]
+      rounds:
+        default: "3"
+      iterations:
+        default: "10"
+      metric_sets:
+        description: "Comma-separated: size,init,micro"
+        default: "size,init,micro"
+      signed_size:
+        description: "Also run the signed App Thinning size lane (needs the Apple signing secrets)"
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      versions: { type: string, required: true }
+      source: { type: string, default: xcframework }
+      sdk_repo: { type: string, default: backtrace-labs/backtrace-cocoa }
+      sdk_ref: { type: string, default: master }
+      runner: { type: string, default: macos-26 }
+      rounds: { type: string, default: "3" }
+      iterations: { type: string, default: "10" }
+      metric_sets: { type: string, default: "size,init,micro" }
+  schedule:
+    - cron: "30 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.versions || 'nightly' }}
+  cancel-in-progress: false
+
+jobs:
+  ladder:
+    runs-on: ${{ inputs.runner || 'macos-26' }}
+    timeout-minutes: 45
+    env:
+      VERSIONS: ${{ inputs.versions || '2.1.0,2.2.0' }}
+      SOURCE: ${{ inputs.source || 'xcframework' }}
+      ROUNDS: ${{ inputs.rounds || '3' }}
+      ITERATIONS: ${{ inputs.iterations || '10' }}
+      METRIC_SETS: ${{ inputs.metric_sets || 'size,init,micro' }}
+      OUT: out/apple
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install harness requirements
+        run: python3 -m pip install --quiet -r scripts/requirements.txt
+      - name: Install XcodeGen
+        run: brew install xcodegen && xcodegen --version && xcodebuild -version
+      - name: Checkout SDK for local source
+        if: env.SOURCE == 'local'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.sdk_repo || 'backtrace-labs/backtrace-cocoa' }}
+          ref: ${{ inputs.sdk_ref || 'master' }}
+          path: sdk-src
+          persist-credentials: false
+      - name: Boot simulator
+        id: sim
+        uses: futureware-tech/simulator-action@e89aa8f93d3aec35083ff49d2854d07f7186f7f5 # v5
+        with:
+          model: iPhone 17
+          os: iOS
+          wait_for_boot: true
+          erase_before_boot: true
+      - name: Environment fingerprint
+        run: scripts/env_fingerprint.sh --set tier=tier1 --set simulator="${{ steps.sim.outputs.udid }}" > env.json && cat env.json
+      - name: Build, install and run ladder
+        env:
+          SIM_UDID: ${{ steps.sim.outputs.udid }}
+        run: scripts/ci/lane_apple.sh all
+      - name: Signed App Thinning size lane
+        if: ${{ inputs.signed_size == true }}
+        env:
+          BUILD_CERTIFICATE_BASE64_2026: ${{ secrets.BUILD_CERTIFICATE_BASE64_2026 }}
+          P12_PASSWORD_2026: ${{ secrets.P12_PASSWORD_2026 }}
+          BUILD_PROVISION_PROFILE_BASE64_2026: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64_2026 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          DISTRIBUTION_IDENTITY: ${{ secrets.DISTRIBUTION_IDENTITY }}
+        run: scripts/ci/lane_apple.sh thinning || { rc=$?; [ "$rc" = "4" ] && echo "::notice::signed size lane unsupported with the configured profile" || exit "$rc"; }
+      - name: Compare and summarize
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          scripts/ci/lane_apple.sh report | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: rows-apple-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            out/apple/rows
+            out/apple/report
+            env.json
+          if-no-files-found: warn
+          retention-days: 30
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: raw-apple-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/apple/raw
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,0 +1,77 @@
+name: bench-sauce
+
+# Optional real-device lane. Numbers only: cloud devices run with unlocked clocks, so results are trends, never gates.
+# Results are recovered from the device log (the harness echoes its JSON in 2000-character chunks).
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: "Up to two comma-separated Android SDK versions"
+        default: "3.13.0,3.14.0"
+      device:
+        description: "Sauce Labs real device id"
+        default: "Google_Pixel_9_Pro_XL_15_real_sjc1"
+      iterations:
+        default: "12"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android-real-device:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      SAUCE_USERNAME: ${{ secrets.SAUCE_USERNAME }}
+      VERSIONS: ${{ inputs.versions }}
+      DEVICE: ${{ inputs.device }}
+      ITERATIONS: ${{ inputs.iterations }}
+      OUT: out/sauce
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require credentials
+        if: env.SAUCE_USERNAME == ''
+        run: echo "::error::SAUCE_USERNAME/SAUCE_ACCESS_KEY secrets are not configured" && exit 1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --quiet -r scripts/requirements.txt
+      - name: Environment fingerprint
+        run: scripts/env_fingerprint.sh --set tier=tier2 --set device="$DEVICE" > env.json
+      - name: Build app and macrobenchmark APKs for each version
+        run: scripts/ci/lane_sauce.sh build
+      - name: Render saucectl config
+        run: scripts/ci/lane_sauce.sh config > .sauce/rendered.yml && cat .sauce/rendered.yml
+      - name: Run on Sauce Labs
+        uses: saucelabs/saucectl-run-action@283660aa934c02723c497efa151d582a3acc5801 # v4.5.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          sauce-username: ${{ secrets.SAUCE_USERNAME }}
+          sauce-access-key: ${{ secrets.SAUCE_ACCESS_KEY }}
+          saucectl-version: 0.213.0
+          config-file: .sauce/rendered.yml
+      - name: Recover rows from device logs
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          scripts/ci/lane_sauce.sh report | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: rows-sauce-${{ github.run_id }}
+          path: |
+            out/sauce
+            env.json
+          if-no-files-found: warn

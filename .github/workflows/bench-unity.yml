@@ -1,0 +1,166 @@
+name: bench-unity
+
+# One job per Unity editor version. Inside the job the SDK version is switched by re-rendering Packages/manifest.json,
+# so the editor licence is activated once per version pair. Editor PlayMode timings are informational; GC bytes gate.
+on:
+  workflow_dispatch:
+    inputs:
+      version_a:
+        description: "Older SDK version (OpenUPM)"
+        default: "3.16.2"
+      version_b:
+        description: "Newer SDK version (OpenUPM) - also used for the sentinel"
+        default: "3.17.0"
+      editors:
+        description: "JSON array of Unity editor versions"
+        default: '["2022.3.56f1"]'
+      source:
+        default: openupm
+        type: choice
+        options: [openupm, local]
+      sdk_repo:
+        default: backtrace-labs/backtrace-unity
+      sdk_ref:
+        default: master
+      metric_sets:
+        description: "Comma-separated: micro,size"
+        default: "micro"
+  workflow_call:
+    inputs:
+      version_a: { type: string, required: true }
+      version_b: { type: string, required: true }
+      editors: { type: string, default: '["2022.3.56f1"]' }
+      source: { type: string, default: openupm }
+      sdk_repo: { type: string, default: backtrace-labs/backtrace-unity }
+      sdk_ref: { type: string, default: master }
+      metric_sets: { type: string, default: "micro" }
+  schedule:
+    - cron: "0 5 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.version_b || 'weekly' }}
+  cancel-in-progress: false
+
+jobs:
+  ladder:
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        editor: ${{ fromJson(inputs.editors || '["2022.3.56f1"]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      VERSION_A: ${{ inputs.version_a || '3.16.2' }}
+      VERSION_B: ${{ inputs.version_b || '3.17.0' }}
+      SOURCE: ${{ inputs.source || 'openupm' }}
+      METRIC_SETS: ${{ inputs.metric_sets || 'micro' }}
+      EDITOR: ${{ matrix.editor }}
+      OUT: out/unity
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install harness requirements
+        run: python3 -m pip install --quiet -r scripts/requirements.txt
+      - name: Checkout SDK for local source
+        if: env.SOURCE == 'local'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.sdk_repo || 'backtrace-labs/backtrace-unity' }}
+          ref: ${{ inputs.sdk_ref || 'master' }}
+          path: sdk-src
+          lfs: true
+          persist-credentials: false
+      - name: Free disk space for player builds
+        if: contains(env.METRIC_SETS, 'size')
+        uses: jlumbroso/free-disk-space@3f13feab2962a87273d379ebc36ea159527e6cc9 # v1.3.2
+      - name: Environment fingerprint
+        run: scripts/env_fingerprint.sh --set tier=tier1 --set unity="$EDITOR" > env.json && cat env.json
+      - name: Library cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: unity/project/Library
+          key: unity-library-${{ matrix.editor }}-${{ hashFiles('unity/manifest.json.tmpl', 'unity/project/Assets/**') }}
+          restore-keys: unity-library-${{ matrix.editor }}-
+
+      # Version A
+      - name: Render project for version A
+        run: unity/scripts/bench_unity.sh prepare --version "$VERSION_A" --source "$SOURCE" --editor "$EDITOR" --variant sdk ${{ env.SOURCE == 'local' && '--local-path sdk-src' || '' }}
+      - name: PlayMode benchmarks (version A)
+        uses: game-ci/unity-test-runner@32e57712352b500e17974b245a6dce9e11a73213 # v4.4.0
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+        with:
+          packageMode: false
+          projectPath: unity/project
+          testMode: playmode
+          unityVersion: ${{ matrix.editor }}
+          artifactsPath: out/unity/raw/a
+          customParameters: -nographics -perfTestResults /github/workspace/out/unity/raw/a/PerformanceTestResults.json -btBenchOut /github/workspace/out/unity/raw/a
+      # Version B
+      - name: Render project for version B
+        run: unity/scripts/bench_unity.sh prepare --version "$VERSION_B" --source "$SOURCE" --editor "$EDITOR" --variant sdk ${{ env.SOURCE == 'local' && '--local-path sdk-src' || '' }}
+      - name: PlayMode benchmarks (version B)
+        uses: game-ci/unity-test-runner@32e57712352b500e17974b245a6dce9e11a73213 # v4.4.0
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+        with:
+          packageMode: false
+          projectPath: unity/project
+          testMode: playmode
+          unityVersion: ${{ matrix.editor }}
+          artifactsPath: out/unity/raw/b
+          customParameters: -nographics -perfTestResults /github/workspace/out/unity/raw/b/PerformanceTestResults.json -btBenchOut /github/workspace/out/unity/raw/b
+      # Sentinel: version B again, under its own identity, to measure the job noise floor
+      - name: Render project for sentinel
+        run: unity/scripts/bench_unity.sh prepare --version "$VERSION_B" --source "$SOURCE" --editor "$EDITOR" --variant sentinel ${{ env.SOURCE == 'local' && '--local-path sdk-src' || '' }}
+      - name: PlayMode benchmarks (sentinel)
+        uses: game-ci/unity-test-runner@32e57712352b500e17974b245a6dce9e11a73213 # v4.4.0
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
+        with:
+          packageMode: false
+          projectPath: unity/project
+          testMode: playmode
+          unityVersion: ${{ matrix.editor }}
+          artifactsPath: out/unity/raw/sentinel
+          customParameters: -nographics -perfTestResults /github/workspace/out/unity/raw/sentinel/PerformanceTestResults.json -btBenchOut /github/workspace/out/unity/raw/sentinel
+
+      - name: Fix ownership of container outputs
+        if: ${{ !cancelled() }}
+        run: sudo chown -R "$(id -u):$(id -g)" out unity/project || true
+      - name: Rows, compare and summarize
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          scripts/ci/lane_unity.sh report | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: rows-unity-${{ matrix.editor }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            out/unity/rows
+            out/unity/report
+            env.json
+          if-no-files-found: warn
+          retention-days: 30
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: raw-unity-${{ matrix.editor }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/unity/raw
+          if-no-files-found: ignore
+          retention-days: 7

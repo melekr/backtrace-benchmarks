@@ -1,0 +1,28 @@
+# Rendered by scripts/ci/lane_sauce.sh config. One suite per SDK version; no orchestrator and no clearPackageData,
+# because the benchmark manages its own process restarts and AOT compilation.
+apiVersion: v1alpha
+kind: espresso
+sauce:
+  region: us-west-1
+  concurrency: 1
+  metadata:
+    build: backtrace-benchmarks-$GITHUB_RUN_ID
+    tags: [benchmarks, android]
+defaults:
+  timeout: 40m
+espresso:
+  app: {{APP_APK}}
+  testApp: {{TEST_APK}}
+suites:
+  - name: "startup {{VERSION}} on {{DEVICE}}"
+    testOptions:
+      annotation: {{ANNOTATION}}
+    devices:
+      - id: {{DEVICE}}
+artifacts:
+  download:
+    when: always
+    match:
+      - junit.xml
+      - "*.log"
+    directory: ./out/sauce/artifacts/{{VERSION}}
