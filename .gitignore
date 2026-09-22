@@ -1,0 +1,31 @@
+# harness
+artifacts/
+out/
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+# android
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.idea/
+android/**/*.iml
+# apple
+apple/*.xcodeproj
+apple/*.xcworkspace
+apple/DerivedData/
+apple/build/
+apple/Vendor/
+apple/Package.swift
+apple/**/*.xcresult
+# unity
+unity/project/Library/
+unity/project/Temp/
+unity/project/Logs/
+unity/project/obj/
+unity/project/UserSettings/
+unity/project/Build*/
+unity/project/Packages/manifest.json
+unity/project/Packages/packages-lock.json

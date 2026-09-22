@@ -1,0 +1,62 @@
+# Gate policy consumed by scripts/compare.py. Schema rules enforced by scripts/thresholds.py:
+#  - every rule needs class in {det, pair, warn, trend}; det/pair rules need rel>0 AND abs>0 (no "> 0" assertions)
+#  - a metric matches the first rule whose glob matches; unmatched metrics are reported as warn
+version: 1
+noise:
+  sentinel_max_rel: 0.05          # |sentinel vs newest| above this => job is 'noisy', no gates evaluated
+  cov_max:
+    ttid: 0.20                    # A2.*, C2.*, U7.player.ttid
+    trace: 0.12                   # A1.*, C1.*, U1.*
+    micro: 0.10                   # everything else timing
+  rerun_failing_variant_once: true
+  min_samples: { perLaunch: 10, perIteration: 20, measurementAverage: 10, exact: 1 }
+comparison:
+  bootstrap_resamples: 10000
+  ci: 0.95
+  pairing: per_round_ratio_to_anchor   # median_variant(round) / median_anchor(round)
+gates:
+  - name: tier0-and-artifact-bytes
+    match: ["A0.*", "C0.*", "U0.*", "A3.so_bytes.*", "U4.native_bytes.*"]
+    class: det
+    rel: 0.02
+    abs: 102400            # 100 KB
+  - name: integrated-size
+    match: ["A3.apk_universal_bytes", "A3.install_bytes.*", "C3.app_binary_bytes", "C3.app_bundle_bytes", "C3.app_zip_bytes", "C3.thinning_download_bytes.*", "U4.player_bytes.*"]
+    class: det
+    rel: 0.02
+    abs: 102400
+    same_job_only: true
+  - name: deterministic-counts
+    match: ["A3.dex_method_refs", "A4.send.alloc_count", "A4.send.write_bytes", "A5.breadcrumb.write_bytes_per_1k", "A7.threads_after_init", "A7.timer_wakeups_120s", "C5.breadcrumb.file_bytes", "C7.threads_after_init", "C7.timer_wakeups_120s", "U1.init.gc_bytes", "U2.send.gc_bytes", "U3.log.gc_bytes", "A1b.zip_reader_symbols"]
+    class: det
+    rel: 0.01
+    abs: 1
+  - name: init-total
+    match: ["A1.init.total", "C1.init.total", "A1b.init.native.largeapk", "U7.player.native_init_ms"]
+    class: pair
+    rel: 0.10
+    abs: 5.0               # ms
+  - name: send-path
+    match: ["A4.send.e2e_ms", "A4.send.caller_ms", "C4.send.caller_ms", "C4.send.e2e_ms", "U2.send.e2e_ms", "U2.tojson_ms", "U2b.unhandled.e2e_ms", "A6.*", "C6.repository_open.*", "U5.db_reload.*", "A8.*", "A10.crash.java_handler_ms", "C8.*", "C8b.*", "U8.*"]
+    class: pair
+    rel: 0.10
+    abs: 0.5               # ms
+  - name: breadcrumb-and-log-micro
+    match: ["A5.breadcrumb.add_us", "A5.breadcrumb.add_native_us", "C5.breadcrumb.add_us.*", "U3.log.per_call_us", "U3.log.per_call_breadcrumbs_us", "U5.breadcrumb.append_us", "U6.lateupdate_us"]
+    class: pair
+    rel: 0.10
+    abs: 50.0              # us
+  - name: cold-start-and-stages
+    match: ["A2.*", "C2.*", "A1.init.*", "C1.init.*", "U1.init.total", "U7.player.ttid", "A10.crash.java_handler_delayed_ms", "C4.send.cpu_ms", "C4.send.memory_peak_kb", "C6.migration_v1_v2_ms", "U2.perf.*"]
+    class: warn
+  - name: real-device-trends
+    match: ["A7.idle.*", "C7.idle.*"]
+    class: trend
+budgets:
+  # Release-time plain-vs-sdk bounds. Evaluated only on same-job data with CI shown; never on PRs.
+  - metric: A2.ttid
+    diff_min_ms: 0
+    diff_max_ms: 150
+  - metric: C2.launch_ms
+    diff_min_ms: 0
+    diff_max_ms: 150
