@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Loopback sockets still need INTERNET on Android. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:name="io.backtrace.bench.app.BenchApplication"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+
+        <!-- Required by Macrobenchmark on a non-debuggable release build. -->
+        <profileable android:shell="true" />
+
+        <activity
+            android:name="io.backtrace.bench.app.MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
