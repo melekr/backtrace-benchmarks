@@ -280,8 +280,14 @@ def fmt_int(n: Any) -> str:
 def fmt_num(x: Any, unit: str = "") -> str:
     if x is None:
         return "n/a"
-    if unit in ("bytes", "count"):
+    if unit == "bytes":
         return fmt_int(x)
+    if unit == "count":
+        try:
+            xf = float(x)
+        except (TypeError, ValueError):
+            return str(x)
+        return fmt_int(xf) if xf == int(xf) else f"{xf:,.1f}"   # an even sample count gives a .5 median
     try:
         xf = float(x)
     except (TypeError, ValueError):

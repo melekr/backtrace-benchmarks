@@ -45,7 +45,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The secrets context is not available in a job-level `if`; a tiny job turns "are the licence secrets set" into an output.
+  preflight:
+    runs-on: ubuntu-24.04
+    outputs:
+      licensed: ${{ steps.check.outputs.licensed }}
+    steps:
+      - id: check
+        env:
+          HAS_LICENSE: ${{ secrets.UNITY_EMAIL != '' && secrets.UNITY_PASSWORD != '' }}
+        run: |
+          echo "licensed=$HAS_LICENSE" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_LICENSE" != "true" ]; then
+            echo "::notice::Unity lane skipped: UNITY_EMAIL and UNITY_PASSWORD (plus UNITY_SERIAL for a Pro seat) are not configured; see docs/SECRETS.md"
+          fi
   ladder:
+    needs: preflight
+    if: needs.preflight.outputs.licensed == 'true'
     strategy:
       fail-fast: false
       max-parallel: 3

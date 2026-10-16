@@ -60,6 +60,10 @@ jobs:
       METRIC_SETS: ${{ inputs.metric_sets || 'size,init,micro,macro' }}
       SCENARIO: ${{ inputs.scenario || 'default' }}
       API_LEVEL: "34"
+      # android-emulator-runner installs the newest emulator and then overlays this pinned build; a quick-boot snapshot
+      # written by one emulator build is rejected by the next ("incompatible version"), which is what broke the lane on
+      # 2026-10-02. The AVD cache key embeds this value, so changing it also starts a fresh cache.
+      EMULATOR_BUILD: "16428233"   # emulator 37.2.12.0
       OUT: out/android
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -107,14 +111,18 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: AVD cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # The quick-boot snapshot is only loadable by the emulator build that wrote it; with another build the AVD
+      # cold-boots from the cached disk overlay instead. The key therefore carries the pinned emulator build, and the
+      # cache is saved right after the snapshot step, before any bench package is installed, so even a cold boot
+      # never exposes packages signed with another job's debug key (INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+      - name: Restore AVD cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: avd-cache
         with:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-${{ env.API_LEVEL }}-google_apis-x86_64-v1
+          key: avd-${{ env.API_LEVEL }}-google_apis-x86_64-emu${{ env.EMULATOR_BUILD }}-v2
       - name: Create AVD snapshot
         if: steps.avd-cache.outputs.cache-hit != 'true'
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
@@ -123,9 +131,18 @@ jobs:
           arch: x86_64
           target: google_apis
           force-avd-creation: false
+          emulator-build: ${{ env.EMULATOR_BUILD }}
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
           disable-animations: false
           script: echo "AVD snapshot created"
+      - name: Save AVD cache
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: ${{ steps.avd-cache.outputs.cache-primary-key }}
       - name: Run ladder on emulator
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
@@ -133,17 +150,18 @@ jobs:
           arch: x86_64
           target: google_apis
           force-avd-creation: false
+          emulator-build: ${{ env.EMULATOR_BUILD }}
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
           disable-animations: true
           script: scripts/ci/lane_android.sh run
 
       - name: Compare and summarize
-        if: ${{ !cancelled() }}
+        if: ${{ always() }}
         run: |
           set -o pipefail
           scripts/ci/lane_android.sh report | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: ${{ !cancelled() }}
+        if: ${{ always() }}
         with:
           name: rows-android-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -153,7 +171,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: ${{ !cancelled() }}
+        if: ${{ always() }}
         with:
           name: raw-android-${{ github.run_id }}-${{ github.run_attempt }}
           path: out/android/raw

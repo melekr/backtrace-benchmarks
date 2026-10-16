@@ -34,6 +34,9 @@ case "$cmd" in
   run)
     serial="${ANDROID_SERIAL:-$("$HOME/Library/Android/sdk/platform-tools/adb" devices 2>/dev/null | grep -E 'device$' | head -1 | cut -f1 || true)}"
     [ -n "$serial" ] || serial="$(adb devices | grep -E 'device$' | head -1 | cut -f1)"
+    # Packages left in a restored emulator image are signed with another job's debug key: remove every bench package.
+    { adb -s "$serial" shell pm list packages 2>/dev/null || true; } | tr -d '\r' | sed -n 's/^package:\(io\.backtrace\.bench\..*\)$/\1/p' \
+      | while read -r pkg; do [ -n "$pkg" ] && { echo "lane: removing stale package $pkg"; adb -s "$serial" uninstall "$pkg" >/dev/null 2>&1 || true; }; done
     if has init; then
       "$repo/scripts/run_ab_rounds.sh" --sdk android --driver "$driver" --parser "$parser" --versions "$VERSIONS" --plain --sentinel \
         --rounds "$ROUNDS" --iterations "$ITERATIONS" --metric-set init --scenario "$SCENARIO" --source "$SOURCE" \
@@ -54,7 +57,9 @@ case "$cmd" in
         d="$OUT/raw/macro/$v"; mkdir -p "$d"
         if run_with_retry "android macro $v (sdk, $SCENARIO)" "$driver" run --metric-set macro --version "$v" --variant sdk --scenario "$SCENARIO" --source "$SOURCE" --serial "$serial" --iterations "$ITERATIONS" --out "$d"; then
           python3 "$parser" "$d" --sdk-version "$v" --variant sdk --scenario "$SCENARIO" --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-platform.jsonl" || true
-          cat "$d"/rows-*.jsonl >> "$OUT/rows/macro.jsonl" 2>/dev/null || true
+          # The Macrobenchmark trace sections also time the init stages, but under a different measurement mode
+          # (compiled app, perf tracing); only the cold-start metrics (A2.*) leave this pass.
+          python3 "$repo/scripts/filter_rows.py" --keep 'A2.*' "$d"/rows-*.jsonl >> "$OUT/rows/macro.jsonl" 2>/dev/null || true
         fi
       fi
     done

@@ -101,8 +101,56 @@ def group_rows(rows: Sequence[Dict[str, Any]]) -> Dict[Tuple[str, str, str, str]
     return out
 
 
+def cell_key(r: Dict[str, Any]) -> Tuple:
+    return (r["metric"], r.get("scenario", "default"), r.get("variant", "sdk"), str(r.get("sdkVersion")), r.get("round"), r.get("position"),
+            (r.get("run") or {}).get("id"))
+
+
+PLATFORM_NOTE_PREFIXES = ("xcresult ", "benchmarkData ", "unity test ")
+
+
+def is_platform_row(r: Dict[str, Any]) -> bool:
+    """Row written by a platform parser (xcresult, benchmarkData.json, PerformanceTestResults.json)."""
+    if r.get("origin"):
+        return r["origin"] == "platform"
+    if str(r.get("notes") or "").startswith(PLATFORM_NOTE_PREFIXES):
+        return True
+    return "rows-platform" in os.path.basename(str(r.get("_file", "")))
+
+
+def dedupe_cells(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One row per (metric, scenario, variant, version, round, position, run id).
+
+    Older raw layouts let both the platform parser and parse_bench_result.py emit the same cell of the same run;
+    the platform parser's row wins (``origin: platform``, or a platform note on rows written before that field
+    existed), otherwise the first row seen is kept. Rows from different runs are never merged."""
+    best: Dict[Tuple, Dict[str, Any]] = {}
+    order: List[Tuple] = []
+    for r in rows:
+        k = cell_key(r)
+        if k not in best:
+            best[k] = r
+            order.append(k)
+        elif is_platform_row(r) and not is_platform_row(best[k]):
+            best[k] = r
+    return [best[k] for k in order]
+
+
+def drop_unrounded(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Within a (metric, scenario, variant, version) group that has rounds >= 1, drop rows from round 0 / no round.
+
+    Round 0 is the default of parsers run outside the interleaved rounds (e.g. the Android macro pass, whose trace
+    sections also time the init stages); such rows must not become an extra stratum next to the real rounds."""
+    rounded = {cell_key(r)[:4] for r in rows if (r.get("round") or 0) >= 1}
+    return [r for r in rows if (r.get("round") or 0) >= 1 or cell_key(r)[:4] not in rounded]
+
+
+def clean_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return drop_unrounded(dedupe_cells([r for r in rows if hc.row_is_valid(r)]))
+
+
 def split_valid(rows: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    good = [r for r in rows if hc.row_is_valid(r)]
+    good = clean_rows(rows)
     bad = [r for r in rows if not hc.row_is_valid(r)]
     return good, bad
 
@@ -124,49 +172,61 @@ def check_env(rows: Sequence[Dict[str, Any]], allow_mixed: bool) -> Tuple[List[s
 
 # ------------------------------------------------------------------ analysis
 
-def ratio_ci(base: Optional[Group], head: Optional[Group], th: Dict[str, Any], seed: int) -> Tuple[Optional[Tuple[float, float]], str]:
-    """(ci, kind): paired per-round ratios when both sides have rounds, else unpaired bootstrap."""
-    if base is None or head is None:
-        return None, "n/a"
-    resamples = int(th["comparison"]["bootstrap_resamples"])
-    ci_level = float(th["comparison"]["ci"])
+def strata(base: Group, head: Group) -> Tuple[Dict[int, List[float]], Dict[int, List[float]], str]:
+    """Per-round samples of both sides (rounds present on both), else one stratum holding every sample."""
     br, hr = base.rounds, head.rounds
-    common = sorted(set(br) & set(hr))
+    common = st.common_rounds(br, hr)
     if common:
-        ratios = st.paired_ratios(hr, br)
-        if ratios:
-            lo, hi = st.bootstrap_ci(ratios, st.median, resamples=resamples, ci=ci_level, seed=seed)
-            return (lo, hi), f"paired, {len(ratios)} round(s)"
-    bs, hs = base.samples, head.samples
-    if len(bs) > 1 or len(hs) > 1:
-        ci = st.ratio_ci_from_samples(bs, hs, resamples=resamples, ci=ci_level, seed=seed)
-        if ci:
-            return ci, f"unpaired, n={len(bs)}/{len(hs)}"
-    return None, "n/a"
+        return {r: br[r] for r in common}, {r: hr[r] for r in common}, f"paired, {len(common)} round(s)"
+    return {0: base.samples}, {0: head.samples}, "unpaired"
+
+
+def ratio_ci(base: Optional[Group], head: Optional[Group], th: Dict[str, Any], seed: int,
+             resamples: Optional[int] = None) -> Tuple[Optional[Tuple[float, float]], str, Optional[float]]:
+    """(ci, kind, point): stratified bootstrap CI and geometric-mean point estimate of the head/base ratio."""
+    if base is None or head is None:
+        return None, "n/a", None
+    sb, sh, kind = strata(base, head)
+    point = st.point_ratio(sb, sh)
+    nb, nh = sum(len(v) for v in sb.values()), sum(len(v) for v in sh.values())
+    if point is None or (nb < 2 and nh < 2):
+        return None, "n/a", point
+    ci = st.stratified_ratio_ci(sb, sh, resamples=resamples or int(th["comparison"]["bootstrap_resamples"]),
+                                ci=float(th["comparison"]["ci"]), seed=seed)
+    return ci, f"{kind}, n={nb}/{nh}", point
 
 
 def inconclusive_reason(g: Group, th: Dict[str, Any]) -> Optional[str]:
+    """Too few samples for a verdict (the only hard reason; dispersion is a caveat, the CI decides)."""
     n = len(g.samples)
     need = thr.min_samples(g.sample_kind, th)
     if n < need:
         return f"n={n} < min_samples[{g.sample_kind or 'exact'}]={need}"
-    if g.unit in TIMING_UNITS and n >= 2:
-        c = st.cov(g.samples)
-        limit = thr.cov_limit(g.metric, th)
-        if c > limit:
-            return f"CoV {c:.3f} > {limit:.2f}"
+    return None
+
+
+def caveat(base: Optional[Group], head: Optional[Group], th: Dict[str, Any]) -> Optional[str]:
+    """Robust CoV of either side above the class limit: the row is noisy, shown next to the verdict without changing it."""
+    sides = [g for g in (base, head) if g is not None and g.unit in TIMING_UNITS and len(g.samples) >= 2]
+    if not sides:
+        return None
+    limit = thr.cov_limit(sides[0].metric, th)
+    covs = [st.robust_cov(g.samples) for g in sides]
+    if max(covs) > limit:
+        return "noisy: rCoV " + "/".join(f"{c:.3f}" for c in covs) + f" > {limit:.2f}"
     return None
 
 
 def compare_groups(base: Optional[Group], head: Optional[Group], th: Dict[str, Any], catalog: hc.MetricCatalog,
-                   seed: int, gating: bool) -> Dict[str, Any]:
+                   seed: int, gating: bool, resamples: Optional[int] = None) -> Dict[str, Any]:
     metric = (head or base).metric
     gate = thr.resolve_gate(metric, th, catalog)
-    ci, ci_kind = ratio_ci(base, head, th, seed)
+    ci, ci_kind, point = ratio_ci(base, head, th, seed, resamples)
     reasons = [r for r in (inconclusive_reason(g, th) for g in (base, head) if g is not None) if r]
+    caveats = [c for c in (caveat(base, head, th),) if c]
     bval = base.value if base else None
     hval = head.value if head else None
-    v = st.verdict(bval, hval, gate, ci, inconclusive=bool(reasons))
+    v = st.verdict(bval, hval, gate, ci, inconclusive=bool(reasons), point=point, report_rel=thr.report_rel(th))
     same_job_ok = True
     if gate.get("same_job_only") and base is not None and head is not None and not (base.run_ids & head.run_ids):
         same_job_ok = False
@@ -174,9 +234,10 @@ def compare_groups(base: Optional[Group], head: Optional[Group], th: Dict[str, A
     return {
         "metric": metric, "unit": (head or base).unit, "class": gate["class"], "rule": gate["name"],
         "base": bval, "head": hval, "delta": v["delta"], "delta_rel": v["delta_rel"], "ratio": v["ratio"],
-        "ci": list(ci) if ci else None, "ci_kind": ci_kind,
+        "limit": v["limit"], "ci": list(ci) if ci else None, "ci_kind": ci_kind,
         "verdict": v["verdict"] if same_job_ok else f"{v['verdict']} (not same job; not gated)",
-        "fails_gate": fails, "inconclusive": bool(reasons), "reasons": reasons,
+        "tier": v["tier"], "significant": bool(v["significant"]), "lean": v["lean"],
+        "fails_gate": fails, "inconclusive": bool(reasons) or bool(v["no_ci"]), "reasons": reasons, "caveats": caveats,
         "n_base": len(base.samples) if base else 0, "n_head": len(head.samples) if head else 0,
     }
 
@@ -198,8 +259,9 @@ def noise_from_sentinel(sentinel_groups: Dict[Tuple[str, str, str, str], Group],
         if ref is None:
             continue
         rounds_s, rounds_r = sg.rounds, ref.rounds
-        ratios = st.paired_ratios(rounds_s, rounds_r) if (rounds_s and rounds_r) else []
-        ratio = st.median(ratios) if ratios else (sg.value / ref.value if ref.value else None)
+        ratio = st.point_ratio(rounds_r, rounds_s) if (rounds_s and rounds_r) else None
+        if ratio is None:
+            ratio = sg.value / ref.value if ref.value else None
         d = None if ratio is None else abs(ratio - 1.0)
         deltas.append(d)
         if d is not None:
@@ -211,6 +273,75 @@ def noise_from_sentinel(sentinel_groups: Dict[Tuple[str, str, str, str], Group],
 
 
 # ------------------------------------------------------------------- rendering
+
+MARKERS = {"improved": "🟢", "improved (small)": "🟢", "regressed": "🔴", "regressed (small)": "🟠",
+           "no change": "⚪", "within threshold": "⚪", "no significant change": "⚪", "inconclusive": "⚫", "n/a": "·"}
+IMPROVED_TIERS = ("improved", "improved (small)")
+REGRESSED_TIERS = ("regressed", "regressed (small)")
+
+
+def marker(tier: Optional[str]) -> str:
+    return MARKERS.get(str(tier), "·")
+
+
+def verdict_cell(c: Dict[str, Any]) -> str:
+    """Marker + verdict + n/caveat notes for one comparison, e.g. "🟢 improved (noisy: rCoV 0.35 > 0.12)"."""
+    notes = list(c.get("reasons") or []) + list(c.get("caveats") or [])
+    text = f"{marker(c.get('tier'))} {c['verdict']}"
+    if notes:
+        text += " (" + "; ".join(notes) + ")"
+    if c.get("fails_gate"):
+        text = f"**GATE FAILED** {text}"
+    return text
+
+
+def summary_counts(results: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    out = {"improved": 0, "improved (small)": 0, "regressed": 0, "regressed (small)": 0, "no change": 0, "inconclusive": 0, "n/a": 0}
+    for c in results:
+        t = c.get("tier")
+        if t in IMPROVED_TIERS:
+            out["improved"] += 1
+            if t == "improved (small)":
+                out["improved (small)"] += 1
+        elif t in REGRESSED_TIERS:
+            out["regressed"] += 1
+            if t == "regressed (small)":
+                out["regressed (small)"] += 1
+        elif t in ("no change", "within threshold", "no significant change"):
+            out["no change"] += 1
+        elif t == "inconclusive":
+            out["inconclusive"] += 1
+        else:
+            out["n/a"] += 1
+    return out
+
+
+def summary_line(label: str, results: Sequence[Dict[str, Any]]) -> str:
+    n = summary_counts(results)
+    leaning = sum(1 for c in results if c.get("tier") == "inconclusive" and c.get("lean") == "improved")
+    parts = [f"🟢 {n['improved']} improved" + (f" ({n['improved (small)']} small)" if n["improved (small)"] else ""),
+             f"🔴 {n['regressed'] - n['regressed (small)']} regressed" + (f", 🟠 {n['regressed (small)']} regressed (small)" if n["regressed (small)"] else ""),
+             f"⚪ {n['no change']} unchanged",
+             f"⚫ {n['inconclusive']} inconclusive" + (f" ({leaning} leaning improved)" if leaning else "")]
+    if n["n/a"]:
+        parts.append(f"· {n['n/a']} not comparable")
+    return f"**{label}: " + ", ".join(parts) + "**"
+
+
+def change_list(results: Sequence[Dict[str, Any]], tiers: Sequence[str], label: str) -> List[str]:
+    """Bulleted, largest relative change first: `metric`: base → head (Δ%, CI [..])."""
+    picked = sorted([c for c in results if c.get("tier") in tiers], key=lambda c: -abs(c.get("delta_rel") or 0))
+    if not picked:
+        return [f"### {label}", "", "None.", ""]
+    lines = [f"### {label}", ""]
+    for c in picked:
+        name = f"`{c['metric']}`" + (f" ({c['scenario']})" if c.get("scenario", "default") != "default" else "")
+        small = " (small)" if str(c.get("tier", "")).endswith("(small)") else ""
+        lines.append(f"- {marker(c['tier'])} {name}: {fmt_val(c['base'], c['unit'])} → {fmt_val(c['head'], c['unit'])} {c['unit']}"
+                     f" ({hc.fmt_pct(c['delta_rel'])}{small}; CI {fmt_ci(c['ci'])})")
+    lines.append("")
+    return lines
+
 
 def fmt_ci(ci: Optional[Sequence[float]]) -> str:
     if not ci:
@@ -278,37 +409,49 @@ def mode_ladder(args: argparse.Namespace, th: Dict[str, Any], catalog: hc.Metric
             unit = next(g.unit for g in per_v.values() if g)
             gate = thr.resolve_gate(m, th, catalog)
             cells = [f"`{m}`" + (f" ({sc})" if sc != "default" else ""), gate["class"]]
-            prev_val: Optional[float] = None
+            prev_g: Optional[Group] = None
             values: Dict[str, Optional[float]] = {}
+            steps: List[Dict[str, Any]] = []
             for v in present:
                 g = per_v[v]
                 val = g.value if g else None
                 values[v] = val
                 if val is None:
                     cells.append("n/a")
-                elif prev_val in (None, 0):
+                elif prev_g is None:
                     cells.append(fmt_val(val, unit))
                 else:
-                    cells.append(f"{fmt_val(val, unit)} ({hc.fmt_pct(val / prev_val - 1)})")
-                if val is not None:
-                    prev_val = val
+                    # Each step is its own comparison with the full resample count, so the marker reflects
+                    # significance and threshold and agrees with the newest-vs-anchor column when they coincide.
+                    step = compare_groups(prev_g, g, th, catalog, args.seed, gating=False)
+                    step["from"], step["to"] = prev_g.version, v
+                    steps.append(step)
+                    cells.append(f"{fmt_val(val, unit)} ({marker(step['tier'])} {hc.fmt_pct(step['delta_rel'])})")
+                if g is not None:
+                    prev_g = g
             a, n = per_v.get(anchor), per_v.get(newest)
             cmp_ = compare_groups(a, n, th, catalog, args.seed, gating=False) if (a and n) else None
             if cmp_:
-                cells += [hc.fmt_pct(cmp_["delta_rel"]), fmt_ci(cmp_["ci"]), cmp_["verdict"]]
+                cmp_["scenario"] = sc
+                cells += [hc.fmt_pct(cmp_["delta_rel"]), fmt_ci(cmp_["ci"]), verdict_cell(cmp_)]
             else:
                 cells += ["n/a", "n/a", "n/a"]
             table_rows.append(cells)
-            entries.append({"metric": m, "scenario": sc, "unit": unit, "class": gate["class"], "values": values, "newest_vs_anchor": cmp_})
+            entries.append({"metric": m, "scenario": sc, "unit": unit, "class": gate["class"], "values": values,
+                            "newest_vs_anchor": cmp_, "steps": steps})
 
     headers = ["metric", "class"] + present + [f"Δ {anchor}→{newest}", f"{int(th['comparison']['ci'] * 100)}% CI (ratio)", "verdict"]
+    overall = [e["newest_vs_anchor"] for e in entries if e["newest_vs_anchor"]]
     md = [f"## {args.sdk} ladder: {' → '.join(present)}", ""]
     md += env_lines(fps, mixed, good)
-    md += [f"Anchor (oldest) = {anchor}; each cell shows the pooled median and Δ vs the previous column; CI = bootstrap of paired per-round ratios newest/anchor where rounds exist ({th['comparison']['bootstrap_resamples']} resamples, seed {args.seed}). Ladders never gate.", ""]
+    md += ["", summary_line(f"{anchor} → {newest}", overall), ""]
+    md += change_list(overall, IMPROVED_TIERS, f"Improvements since {anchor}")
+    md += change_list(overall, REGRESSED_TIERS, f"Regressions since {anchor}")
+    md += [f"Anchor (oldest) = {anchor}; each cell shows the pooled median and the marked Δ vs the previous column (its own comparison); the last three columns compare newest to anchor: stratified bootstrap CI of the geometric mean of per-round median ratios ({th['comparison']['bootstrap_resamples']} resamples, seed {args.seed}). Markers: 🟢 improved, 🟠 regressed (small), 🔴 regressed, ⚪ no change / within threshold / no significant change, ⚫ inconclusive. Ladders never gate.", ""]
     md.append(hc.md_table(headers, table_rows))
     md += ["", "### Excluded rows", "", excluded_section(bad)]
     data = {"mode": "ladder", "sdk": args.sdk, "versions": present, "anchor": anchor, "fingerprints": fps, "mixed_env": mixed,
-            "metrics": entries, "excluded": [hc.strip_private(r) for r in bad], "exit_code": EXIT_OK}
+            "summary": summary_counts(overall), "metrics": entries, "excluded": [hc.strip_private(r) for r in bad], "exit_code": EXIT_OK}
     return "\n".join(md) + "\n", data, EXIT_OK
 
 
@@ -338,9 +481,10 @@ def kpi_block(sdk: str, base_groups: Dict, head_groups: Dict, plain_groups: Dict
         head_added = hs.value - ps.value
         base_added = (bs.value - bp.value) if (bs and bp) else None
         d = (head_added - base_added) if base_added is not None else None
+        sv = st.verdict(base_added, head_added, thr.resolve_gate(hs.metric, th, catalog)) if base_added is not None else {"verdict": "n/a", "tier": "n/a"}
         lines.append(["Size added by SDK (integrated, vs plain)", fmt_val(base_added, "bytes"), fmt_val(head_added, "bytes"), fmt_delta(d, "bytes"), "n/a",
-                      "n/a" if d is None else ("no change" if d == 0 else ("regressed (within threshold)" if d > 0 else "improved"))])
-        data.append({"kpi": "size_added", "base": base_added, "head": head_added, "delta": d})
+                      f"{marker(sv['tier'])} {sv['verdict']}"])
+        data.append({"kpi": "size_added", "base": base_added, "head": head_added, "delta": d, "tier": sv["tier"], "verdict": sv["verdict"]})
         if head_added <= 0:
             lines[-1][-1] = "INVALID: plain-vs-sdk size diff must be > 0"
     else:
@@ -349,7 +493,7 @@ def kpi_block(sdk: str, base_groups: Dict, head_groups: Dict, plain_groups: Dict
         c = compare_groups(bg, hg, th, catalog, seed, gating=False) if (hg or bg) else None
         if c:
             lines.append([f"Size added by SDK (published artifact `{published}`)", fmt_val(c["base"], "bytes"), fmt_val(c["head"], "bytes"),
-                          fmt_delta(c["delta"], "bytes"), fmt_ci(c["ci"]), c["verdict"]])
+                          fmt_delta(c["delta"], "bytes"), fmt_ci(c["ci"]), verdict_cell(c)])
             data.append({"kpi": "size_added", **c})
         else:
             lines.append(["Size added by SDK", "n/a", "n/a", "n/a", "n/a", "no size rows"])
@@ -359,7 +503,7 @@ def kpi_block(sdk: str, base_groups: Dict, head_groups: Dict, plain_groups: Dict
         bg = _find_group(base_groups, m, sc, "sdk")
         if hg or bg:
             c = compare_groups(bg, hg, th, catalog, seed, gating=False)
-            lines.append([f"{label} `{m}`", fmt_val(c["base"], c["unit"]), fmt_val(c["head"], c["unit"]), fmt_delta(c["delta"], c["unit"]), fmt_ci(c["ci"]), c["verdict"]])
+            lines.append([f"{label} `{m}`", fmt_val(c["base"], c["unit"]), fmt_val(c["head"], c["unit"]), fmt_delta(c["delta"], c["unit"]), fmt_ci(c["ci"]), verdict_cell(c)])
             data.append({"kpi": key, **c})
         else:
             lines.append([f"{label} `{m}`", "n/a", "n/a", "n/a", "n/a", "no rows"])
@@ -383,10 +527,10 @@ def mode_pr(args: argparse.Namespace, th: Dict[str, Any], catalog: hc.MetricCata
     fps, mixed = check_env(good, args.allow_mixed_env)
     gating = bool(args.gate) and not mixed
 
-    bg = group_rows([r for r in base_rows if hc.row_is_valid(r) and r.get("variant", "sdk") != "plain"])
-    hg = group_rows([r for r in head_rows if hc.row_is_valid(r) and r.get("variant", "sdk") != "plain"])
-    pg = group_rows([r for r in plain_rows + base_rows + head_rows if hc.row_is_valid(r) and r.get("variant") == "plain"])
-    sg = group_rows([r for r in sentinel_rows if hc.row_is_valid(r)])
+    bg = group_rows(clean_rows([r for r in base_rows if r.get("variant", "sdk") != "plain"]))
+    hg = group_rows(clean_rows([r for r in head_rows if r.get("variant", "sdk") != "plain"]))
+    pg = group_rows(clean_rows([r for r in plain_rows + base_rows + head_rows if r.get("variant") == "plain"]))
+    sg = group_rows(clean_rows(sentinel_rows))
     sdks = sorted({r.get("sdk") for r in good if r.get("sdk")})
     sdk = sdks[0] if len(sdks) == 1 else None
 
@@ -420,7 +564,9 @@ def mode_pr(args: argparse.Namespace, th: Dict[str, Any], catalog: hc.MetricCata
 
     base_versions = sorted({str(r.get("sdkVersion")) for r in base_rows}, key=hc.version_key)
     head_versions = sorted({str(r.get("sdkVersion")) for r in head_rows}, key=hc.version_key)
+    label = f"{', '.join(base_versions) or 'base'} → {', '.join(head_versions) or 'head'}"
     md = [f"## PR comparison{': ' + sdk if sdk else ''} — base {', '.join(base_versions) or 'n/a'} vs head {', '.join(head_versions) or 'n/a'}", ""]
+    md += [summary_line(label, results), ""]
     md += env_lines(fps, mixed, good)
     if noise["measured"]:
         worst = noise["max_rel"]
@@ -429,28 +575,30 @@ def mode_pr(args: argparse.Namespace, th: Dict[str, Any], catalog: hc.MetricCata
     else:
         md.append("Noise floor: not measured (no sentinel rows).")
     md.append("")
+    md += change_list(results, IMPROVED_TIERS, "Improvements")
+    md += change_list(results, REGRESSED_TIERS, "Regressions")
     if sdk:
         md += ["### Headline", ""]
         block, kpis = kpi_block(sdk, bg, hg, pg, th, catalog, args.seed, args.scenario)
         md += [block, ""]
     else:
         kpis = []
-    md += ["### All metrics", ""]
+    md += ["### All metrics", "",
+           "base and head are pooled medians; Δ% is the paired ratio estimate (geometric mean over rounds of median head / median base), Δ = base × (ratio − 1) for timing metrics and the exact difference for deterministic ones; the CI is a stratified bootstrap of that ratio. "
+           "Markers: 🟢 improved, 🟠 regressed (small), 🔴 regressed, ⚪ no change / within threshold / no significant change, ⚫ inconclusive (too few samples, no CI, or a wide CI whose point estimate is beyond the threshold).", ""]
     trows = []
     for c in results:
         name = f"`{c['metric']}`" + (f" ({c['scenario']})" if c["scenario"] != "default" else "")
-        verdict = c["verdict"]
-        if c["reasons"]:
-            verdict += " (" + "; ".join(c["reasons"]) + ")"
-        if c["fails_gate"]:
-            verdict = f"**GATE FAILED** {verdict}"
         trows.append([name, c["class"], fmt_val(c["base"], c["unit"]), fmt_val(c["head"], c["unit"]), fmt_delta(c["delta"], c["unit"]),
-                      hc.fmt_pct(c["delta_rel"]), fmt_ci(c["ci"]) + ("" if c["ci_kind"] == "n/a" else f" {c['ci_kind']}"), verdict])
+                      hc.fmt_pct(c["delta_rel"]), fmt_ci(c["ci"]) + ("" if c["ci_kind"] == "n/a" else f" {c['ci_kind']}"), verdict_cell(c)])
     md.append(hc.md_table(["Metric", "class", "base", "head", "Δ", "Δ%", f"{int(th['comparison']['ci'] * 100)}% CI (ratio)", "verdict"], trows))
     md += ["", f"Gate result: {'not evaluated (--gate not given)' if not args.gate else ('disabled (noisy/mixed env)' if (noisy or mixed) else ('FAILED: ' + ', '.join(c['metric'] for c in failed) if failed else 'passed'))}"
            + (f"; inconclusive: {', '.join(c['metric'] for c in inconclusive)}" if inconclusive else "") + f"; exit code {code}", ""]
     md += ["### Excluded rows", "", excluded_section(bad)]
     data = {"mode": "pr", "sdk": sdk, "fingerprints": fps, "mixed_env": mixed, "noise": noise, "gating": gating, "kpis": kpis,
+            "summary": summary_counts(results),
+            "improvements": [c["metric"] for c in results if c["tier"] in IMPROVED_TIERS],
+            "regressions": [c["metric"] for c in results if c["tier"] in REGRESSED_TIERS],
             "metrics": results, "failed": [c["metric"] for c in failed], "inconclusive": [c["metric"] for c in inconclusive],
             "excluded": [hc.strip_private(r) for r in bad], "exit_code": code}
     return "\n".join(md) + "\n", data, code
@@ -466,8 +614,8 @@ def mode_overhead(args: argparse.Namespace, th: Dict[str, Any], catalog: hc.Metr
     if not good:
         raise CompareError("no valid rows")
     fps, mixed = check_env(good, args.allow_mixed_env)
-    pg = group_rows([r for r in plain_rows if hc.row_is_valid(r) and r.get("variant") == "plain"])
-    sg = group_rows([r for r in sdk_rows if hc.row_is_valid(r) and r.get("variant", "sdk") == "sdk"])
+    pg = group_rows(clean_rows([r for r in plain_rows if r.get("variant") == "plain"]))
+    sg = group_rows(clean_rows([r for r in sdk_rows if r.get("variant", "sdk") == "sdk"]))
     if not pg:
         raise CompareError("no valid variant=plain rows in --plain")
     if not sg:
@@ -481,7 +629,7 @@ def mode_overhead(args: argparse.Namespace, th: Dict[str, Any], catalog: hc.Metr
         c = compare_groups(p, s, th, catalog, args.seed, gating=False)
         trows.append([f"`{metric}`" + (f" ({scenario})" if scenario != "default" else ""), fmt_val(c["base"], c["unit"]), fmt_val(c["head"], c["unit"]),
                       f"{fmt_delta(c['delta'], c['unit'])} ({hc.fmt_pct(c['delta_rel'])})", fmt_ci(c["ci"])])
-        entries.append({"metric": metric, "scenario": scenario, "plain": c["base"], "sdk": c["head"], "overhead": c["delta"], "overhead_rel": c["delta_rel"], "ci": c["ci"], "unit": c["unit"]})
+        entries.append({"metric": metric, "scenario": scenario, "plain": c["base"], "sdk": c["head"], "overhead": c["delta"], "overhead_rel": c["delta_rel"], "ci": c["ci"], "unit": c["unit"], "tier": c["tier"]})
     versions = sorted({str(r.get("sdkVersion")) for r in sdk_rows}, key=hc.version_key)
     md = [f"## Overhead: plain vs with Backtrace ({', '.join(versions)})", ""]
     md += env_lines(fps, mixed, good)

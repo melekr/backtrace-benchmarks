@@ -80,11 +80,23 @@ def cov(xs: Sequence[float]) -> float:
     return 0.0 if m == 0 else stdev(xs) / abs(m)
 
 
+def robust_cov(xs: Sequence[float]) -> float:
+    """Outlier-resistant dispersion: 1.4826 * MAD / |median| (equals the CoV for normal data); 0 when the median is 0."""
+    m = median(xs)
+    return 0.0 if m == 0 else 1.4826 * mad(xs) / abs(m)
+
+
+def geomean(xs: Sequence[float]) -> float:
+    if not xs:
+        raise ValueError("geomean of empty sequence")
+    return math.exp(sum(math.log(x) for x in xs) / len(xs))
+
+
 def summarize(xs: Sequence[float], sample_kind: Optional[str] = None) -> Dict[str, float]:
     xs = [float(x) for x in xs]
     out: Dict[str, float] = {
         "n": len(xs), "median": median(xs), "mean": mean(xs), "mad": mad(xs),
-        "p95": p95(xs), "min": float(min(xs)), "max": float(max(xs)), "cov": cov(xs),
+        "p95": p95(xs), "min": float(min(xs)), "max": float(max(xs)), "cov": cov(xs), "rcov": robust_cov(xs),
     }
     if sample_kind:
         out["sampleKind"] = sample_kind  # type: ignore[assignment]
@@ -103,6 +115,20 @@ def paired_ratios(variant_rounds: Dict[int, Sequence[float]], anchor_rounds: Dic
             continue
         out.append(v / a)
     return out
+
+
+def common_rounds(base_rounds: Dict[int, Sequence[float]], head_rounds: Dict[int, Sequence[float]]) -> List[int]:
+    return [r for r in sorted(set(base_rounds) & set(head_rounds)) if base_rounds[r] and head_rounds[r]]
+
+
+def point_ratio(base_rounds: Dict[int, Sequence[float]], head_rounds: Dict[int, Sequence[float]]) -> Optional[float]:
+    """Geometric mean over common rounds of ``median(head_r)/median(base_r)``; None without a usable round."""
+    ratios = []
+    for r in common_rounds(base_rounds, head_rounds):
+        b, h = median(base_rounds[r]), median(head_rounds[r])
+        if b > 0 and h > 0:
+            ratios.append(h / b)
+    return geomean(ratios) if ratios else None
 
 
 # ------------------------------------------------------------------- bootstrap
@@ -149,6 +175,46 @@ def ratio_ci_from_samples(base: Sequence[float], head: Sequence[float], resample
     return percentile(ratios, alpha * 100.0), percentile(ratios, (1.0 - alpha) * 100.0)
 
 
+def stratified_ratio_ci(base_rounds: Dict[int, Sequence[float]], head_rounds: Dict[int, Sequence[float]],
+                        resamples: int = DEFAULT_RESAMPLES, ci: float = DEFAULT_CI, seed: int = 0) -> Optional[Tuple[float, float]]:
+    """Percentile bootstrap CI of the geometric mean of per-round median ratios.
+
+    Rounds are fixed strata: both variants ran inside every round, so round-level drift cancels in the ratio and
+    is not resampled. Samples are resampled with replacement within each round on both sides. One round is a
+    plain two-sample bootstrap of the median ratio. The interval only collapses to a point when every sample is
+    identical; it never degenerates the way a bootstrap over three per-round ratios does."""
+    rounds = common_rounds(base_rounds, head_rounds)
+    if not rounds:
+        return None
+    b = {r: [float(x) for x in base_rounds[r]] for r in rounds}
+    h = {r: [float(x) for x in head_rounds[r]] for r in rounds}
+    if any(len(b[r]) < 2 or len(h[r]) < 2 for r in rounds):
+        # A stratum with a single value cannot be resampled: fall back to one unpaired stratum.
+        b = {0: [x for r in rounds for x in b[r]]}
+        h = {0: [x for r in rounds for x in h[r]]}
+        rounds = [0]
+    if sum(len(v) for v in b.values()) < 2 or sum(len(v) for v in h.values()) < 2:
+        return None
+    rng = random.Random(seed)
+    stats: List[float] = []
+    dropped = 0
+    for _ in range(resamples):
+        logs = []
+        for r in rounds:
+            mb = median(rng.choices(b[r], k=len(b[r])))
+            mh = median(rng.choices(h[r], k=len(h[r])))
+            if mb > 0 and mh > 0:
+                logs.append(math.log(mh / mb))
+        if len(logs) == len(rounds):
+            stats.append(math.exp(sum(logs) / len(logs)))
+        else:
+            dropped += 1
+    if not stats or dropped > 0.05 * resamples:
+        return None   # zero medians (counts, byte deltas) make the ratio undefined too often for a usable interval
+    alpha = (1.0 - ci) / 2.0
+    return percentile(stats, alpha * 100.0), percentile(stats, (1.0 - alpha) * 100.0)
+
+
 # ---------------------------------------------------------------- noise floor
 
 def sentinel_delta(sentinel_value: float, reference_value: float) -> Optional[float]:
@@ -166,7 +232,10 @@ def noise_floor(deltas: Iterable[Optional[float]], sentinel_max_rel: float) -> D
 
 # --------------------------------------------------------------------- verdict
 
-VERDICTS = ("no change", "improved", "regressed", "regressed (within threshold)", "inconclusive", "n/a")
+TIERS = ("improved", "improved (small)", "no change", "within threshold", "no significant change", "inconclusive",
+         "regressed (small)", "regressed", "n/a")
+VERDICTS = TIERS
+DEFAULT_REPORT_REL = 0.10
 
 
 def ci_contains_one(ci: Optional[Tuple[float, float]]) -> bool:
@@ -174,76 +243,77 @@ def ci_contains_one(ci: Optional[Tuple[float, float]]) -> bool:
 
 
 def verdict(base: Optional[float], head: Optional[float], gate: Dict[str, object],
-            ci: Optional[Tuple[float, float]] = None, inconclusive: bool = False) -> Dict[str, object]:
-    """Apply the gate class rules from docs/CONVENTIONS.md section 10.
+            ci: Optional[Tuple[float, float]] = None, inconclusive: bool = False, point: Optional[float] = None,
+            report_rel: float = DEFAULT_REPORT_REL) -> Dict[str, object]:
+    """Tiered verdict per docs/CONVENTIONS.md section 10.
 
-    det:  fail iff delta >= max(rel*base, abs)
-    pair: fail iff delta_median >= max(rel*base, abs) and the CI excludes 1
-    warn/trend never fail. Returns {verdict, fails_gate, delta, delta_rel, ratio}.
+    All metrics are lower-is-better. ``limit = max(rel*|base|, abs)`` is the gate threshold (``rel`` falls back to
+    ``report_rel`` and ``abs`` to 0 for warn/trend rules), ``t = limit/|base|`` the same threshold as a ratio.
+      det   : delta == 0 -> no change; |delta| < limit -> within threshold; else improved / regressed (gate fails).
+      timing: the CI decides. CI entirely below 1 -> improved (large: ratio <= 1-t) or improved (small);
+              CI entirely above 1 -> regressed / regressed (small), the pair gate fails only for the large one;
+              CI containing 1 inside [1-t, 1+t] -> no change; a wider CI with the point estimate inside the band ->
+              no significant change; a wider CI with the point estimate beyond the band -> inconclusive (leaning ...).
+              A missing or zero-width CI (identical samples, single values) -> inconclusive (no CI), never a
+              "(small)" tier.
+    ``inconclusive=True`` (too few samples) forces that tier for every class. ``point`` is the paired ratio estimate
+    (defaults to head/base); for timing classes ``delta`` is derived from it (``base * (point - 1)``) so the delta and
+    delta_rel columns agree, while det rows report the exact ``head - base``.
+    Returns {verdict, tier, fails_gate, delta, delta_rel, ratio, limit, significant, lean, no_ci}.
     """
-    out: Dict[str, object] = {"verdict": "n/a", "fails_gate": False, "delta": None, "delta_rel": None, "ratio": None}
+    out: Dict[str, object] = {"verdict": "n/a", "tier": "n/a", "fails_gate": False, "delta": None, "delta_rel": None,
+                              "ratio": None, "limit": None, "significant": False, "lean": None, "no_ci": False}
     if base is None or head is None:
         return out
     delta = head - base
-    ratio = (head / base) if base else None
+    ratio = point if point is not None else ((head / base) if base else None)
     delta_rel = (ratio - 1.0) if ratio is not None else None
-    out.update({"delta": delta, "delta_rel": delta_rel, "ratio": ratio})
     cls = str(gate.get("class", "warn"))
-    if inconclusive:
-        out["verdict"] = "inconclusive"
-        return out
-    rel = gate.get("rel")
-    absv = gate.get("abs")
-    if cls in ("det", "pair") and rel is not None and absv is not None:
-        limit = max(float(rel) * abs(base), float(absv))
-    else:
-        limit = None
+    rel = float(gate["rel"]) if gate.get("rel") is not None else float(report_rel)
+    absv = float(gate["abs"]) if gate.get("abs") is not None else 0.0
+    limit = max(rel * abs(base), absv)
+    t = (limit / abs(base)) if base else rel
+    out.update({"delta": delta, "delta_rel": delta_rel, "ratio": ratio, "limit": limit})
 
-    if cls == "pair":
-        if ci is not None and ci_contains_one(ci):
-            out["verdict"] = "no change"
-            return out
-        if ci is None:
-            # No CI available (no paired rounds and no samples): report direction, never fail.
-            if limit is not None and abs(delta) < limit:
-                out["verdict"] = "no change"
-            else:
-                out["verdict"] = "regressed (within threshold)" if delta > 0 else "improved"
-            out["verdict"] = out["verdict"] if delta != 0 else "no change"
-            return out
-        if limit is not None and delta >= limit:
-            out["verdict"] = "regressed"
-            out["fails_gate"] = True
-        elif delta > 0:
-            out["verdict"] = "regressed (within threshold)"
-        elif delta < 0:
-            out["verdict"] = "improved"
-        else:
-            out["verdict"] = "no change"
+    def finish(tier: str, suffix: str = "", fails: bool = False, significant: bool = False, lean: Optional[str] = None) -> Dict[str, object]:
+        out.update({"tier": tier, "verdict": tier + suffix, "fails_gate": fails, "significant": significant, "lean": lean})
         return out
 
     if cls == "det":
-        if limit is not None and delta >= limit:
-            out["verdict"] = "regressed"
-            out["fails_gate"] = True
-        elif limit is not None and delta <= -limit:
-            out["verdict"] = "improved"
-        elif delta == 0:
-            out["verdict"] = "no change"
-        else:
-            out["verdict"] = "regressed (within threshold)" if delta > 0 else "improved"
-        return out
+        # Deterministic metrics are compared on their exact values, not on the per-round ratio estimate.
+        out.update({"ratio": (head / base) if base else None, "delta_rel": ((head / base) - 1.0) if base else None})
+        if inconclusive:
+            return finish("inconclusive")
+        if delta == 0:
+            return finish("no change")
+        if abs(delta) < limit:
+            return finish("within threshold", significant=True)
+        return finish("regressed", fails=True, significant=True) if delta > 0 else finish("improved", significant=True)
 
-    # warn / trend: informational only
-    if ci is not None and ci_contains_one(ci):
-        out["verdict"] = "no change"
-    elif delta > 0:
-        out["verdict"] = "regressed (within threshold)"
-    elif delta < 0:
-        out["verdict"] = "improved"
-    else:
-        out["verdict"] = "no change"
-    return out
+    if point is not None and base:
+        # Timing classes: the displayed delta follows the paired ratio estimate so delta and delta_rel never disagree in sign.
+        delta = base * (point - 1.0)
+        out["delta"] = delta
+    large_improve = ratio is not None and ratio <= 1.0 - t
+    large_regress = ratio is not None and ratio >= 1.0 + t
+    lean = "improved" if large_improve else ("regressed" if large_regress else None)
+    if inconclusive:
+        return finish("inconclusive", f" (leaning {lean})" if lean else "", lean=lean)
+    if ci is None or ci[0] == ci[1]:
+        out["no_ci"] = True
+        return finish("inconclusive", " (no CI" + (f", leaning {lean})" if lean else ")"), lean=lean)
+    lo, hi = ci
+    if hi < 1.0:
+        return finish("improved" if large_improve else "improved (small)", significant=True)
+    if lo > 1.0:
+        if large_regress:
+            return finish("regressed", fails=(cls == "pair"), significant=True)
+        return finish("regressed (small)", significant=True)
+    if 1.0 - t <= lo and hi <= 1.0 + t:
+        return finish("no change")
+    if lean:
+        return finish("inconclusive", f" (leaning {lean})", lean=lean)
+    return finish("no significant change", f" (CI wider than ±{t * 100:.0f}%)")
 
 
 # ------------------------------------------------------------------------- CLI
@@ -257,9 +327,9 @@ def _summarize_rows(paths: List[str]) -> str:
         table.append([
             r.get("sdk"), r.get("sdkVersion"), r.get("variant"), r.get("scenario"), r.get("metric"), r.get("unit"),
             s["n"], hc.fmt_num(s["median"], r.get("unit", "")), hc.fmt_num(s["mad"], r.get("unit", "")),
-            hc.fmt_num(s["p95"], r.get("unit", "")), f"{s['cov']:.3f}", "yes" if hc.row_is_valid(r) else "NO",
+            hc.fmt_num(s["p95"], r.get("unit", "")), f"{s['cov']:.3f}", f"{s['rcov']:.3f}", "yes" if hc.row_is_valid(r) else "NO",
         ])
-    return hc.md_table(["sdk", "version", "variant", "scenario", "metric", "unit", "n", "median", "MAD", "p95", "CoV", "valid"], table)
+    return hc.md_table(["sdk", "version", "variant", "scenario", "metric", "unit", "n", "median", "MAD", "p95", "CoV", "rCoV", "valid"], table)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

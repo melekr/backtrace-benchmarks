@@ -118,7 +118,7 @@ def main():
                 "schemaVersion": 1, "sdk": "unity", "platform": a.platform, "sdkVersion": a.sdk_version, "source": a.source,
                 "variant": a.variant, "scenario": a.scenario, "metric": name, "unit": to_unit, "value": st["median"],
                 "samples": samples, "round": a.round, "position": a.position, "stats": st, "env": env,
-                "run": {"id": a.run_id, "ts": ts, "workflow": a.workflow, "sha": a.sha}, "valid": True,
+                "run": {"id": a.run_id, "ts": ts, "workflow": a.workflow, "sha": a.sha}, "valid": True, "origin": "platform",
                 "notes": "unity test " + result.get("Name", ""),
             })
     out = sys.stdout if a.out == "-" else open(a.out, "w", encoding="utf-8")

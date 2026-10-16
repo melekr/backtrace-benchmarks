@@ -78,7 +78,7 @@ def main():
         rows.append({"schemaVersion": 1, "sdk": "android", "platform": "android", "sdkVersion": a.sdk_version, "source": a.source,
                      "variant": a.variant, "scenario": a.scenario, "metric": metric, "unit": unit, "value": st["median"],
                      "samples": samples, "round": a.round, "position": a.position, "stats": st, "env": env,
-                     "run": {"id": a.run_id, "ts": ts, "workflow": a.workflow, "sha": a.sha}, "valid": True, "notes": note})
+                     "run": {"id": a.run_id, "ts": ts, "workflow": a.workflow, "sha": a.sha}, "valid": True, "origin": "platform", "notes": note})
 
     for path in files(a.paths):
         seen += 1

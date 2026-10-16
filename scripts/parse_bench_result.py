@@ -21,6 +21,7 @@ import fnmatch
 import glob
 import json
 import os
+import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -32,7 +33,22 @@ THREADS_METRIC = {"android": "A7.threads_after_init", "apple": "C7.threads_after
 DEFAULT_SOURCE = {"android": "maven", "apple": "xcframework", "unity": "openupm"}
 
 
-def find_files(paths: List[str]) -> List[str]:
+INDEXED = re.compile(r"^(bench-result|bt-bench-stages)-(\d+)\.json$")
+
+
+def launch_index(path: str) -> Optional[int]:
+    """Launch sequence number of a per-launch file (bench-result-<i>.json, bt-bench-stages-<i>.json), else None."""
+    m = INDEXED.match(os.path.basename(path))
+    return int(m.group(2)) if m else None
+
+
+def find_files(paths: List[str], keep_last: Optional[int] = None, drop_first: int = 0) -> List[str]:
+    """bench-result*.json / bt-bench-stages*.json under `paths`.
+
+    Per directory, when per-launch files with an index exist the unindexed copy of the same stem (the app's
+    "latest launch" file) is dropped so no launch is counted twice. `drop_first` removes that many lowest indices
+    (the warm-up launches the driver ran first; robust to a later launch that wrote no file) and `keep_last`
+    keeps only the N highest indices."""
     out: List[str] = []
     for p in paths:
         if os.path.isdir(p):
@@ -46,7 +62,26 @@ def find_files(paths: List[str]) -> List[str]:
         if f not in seen:
             seen.add(f)
             uniq.append(f)
-    return uniq
+    by_dir: Dict[str, List[str]] = {}
+    for f in uniq:
+        by_dir.setdefault(os.path.dirname(f), []).append(f)
+    kept: List[str] = []
+    for d, files in by_dir.items():
+        indexed = [f for f in files if launch_index(f) is not None]
+        stems = {INDEXED.match(os.path.basename(f)).group(1) for f in indexed}  # type: ignore[union-attr]
+        for f in files:
+            base = os.path.basename(f)
+            if launch_index(f) is None and base.endswith(".json") and base[:-5] in stems:
+                continue  # bt-bench-stages.json next to bt-bench-stages-<i>.json: same launch as the highest index
+            kept.append(f)
+        if indexed and (drop_first > 0 or keep_last is not None):
+            ordered = sorted(indexed, key=launch_index)
+            drop = set(ordered[:drop_first])
+            if keep_last is not None:
+                remaining = [f for f in ordered if f not in drop]
+                drop |= set(remaining[:-keep_last]) if keep_last > 0 else set(remaining)
+            kept = [f for f in kept if f not in drop]
+    return [f for f in uniq if f in set(kept)]
 
 
 def launch_problems(doc: Dict[str, Any], expect_mock: Optional[int]) -> List[str]:
@@ -155,7 +190,7 @@ def build_rows(pooled: Dict[str, Dict[str, Any]], problems: List[str], meta: Dic
         row: Dict[str, Any] = {
             "schemaVersion": 1, "sdk": sdk, "sdkVersion": str(version), "source": source, "variant": variant,
             "scenario": scenario, "metric": mid, "unit": unit, "value": s["median"], "samples": slot["samples"],
-            "stats": s, "env": env, "run": run, "valid": not problems,
+            "stats": s, "env": env, "run": run, "valid": not problems, "origin": "bench-result",
         }
         if meta.get("platform") or args.platform:
             row["platform"] = args.platform or meta["platform"]
@@ -207,12 +242,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="glob(s) of metric ids to drop, e.g. 'C1.*' (repeatable or comma-separated)")
     ap.add_argument("--exclude-metrics-in", metavar="ROWS_JSONL",
                     help="drop metric ids already present in this rows file (the platform parser's output wins)")
+    ap.add_argument("--keep-last", type=int, metavar="N",
+                    help="per directory keep only the N per-launch files with the highest index")
+    ap.add_argument("--drop-first", type=int, default=0, metavar="N",
+                    help="per directory drop the N per-launch files with the lowest index (the driver's warm-up launches)")
     ap.add_argument("--metrics", default=hc.METRICS_PATH)
     ap.add_argument("--out", help="rows.jsonl (default stdout)")
     ap.add_argument("--append", action="store_true")
     args = ap.parse_args(argv)
 
-    files = find_files(args.paths)
+    files = find_files(args.paths, args.keep_last, args.drop_first)
     if not files:
         print("parse_bench_result: no bench-result*.json found", file=sys.stderr)
         return 1

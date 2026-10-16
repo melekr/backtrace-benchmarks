@@ -11,11 +11,13 @@ Exit codes: 0 ok, 4 when the release asset does not exist (unsupported cell), 1 
 Python 3 stdlib only; only contacts github.com release downloads.
 """
 import argparse
+import http.client
 import os
 import shutil
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -24,12 +26,39 @@ RELEASE_URL = "https://github.com/backtrace-labs/backtrace-cocoa/releases/downlo
 FRAMEWORKS = ("Backtrace.xcframework", "CrashReporter.xcframework")
 
 
-def download(url, dest):
+DOWNLOAD_ATTEMPTS = 4
+
+
+class TruncatedDownload(Exception):
+    """The body ended before the announced Content-Length."""
+
+
+def download(url, dest, attempts=DOWNLOAD_ATTEMPTS, sleep=time.sleep):
+    """Download with retries (2 s, 4 s, 8 s back-off). HTTP 404 is final; other errors are retried."""
     tmp = dest + ".part"
     request = urllib.request.Request(url, headers={"User-Agent": "backtrace-benchmarks/1.0"})
-    with urllib.request.urlopen(request, timeout=120) as response, open(tmp, "wb") as handle:
-        shutil.copyfileobj(response, handle)
-    os.replace(tmp, dest)
+    delay = 2.0
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response, open(tmp, "wb") as handle:
+                expected = (getattr(response, "headers", None) or {}).get("Content-Length")
+                shutil.copyfileobj(response, handle)
+            written = os.path.getsize(tmp)
+            if expected is not None and expected.isdigit() and written != int(expected):
+                raise TruncatedDownload("got %d of %s bytes" % (written, expected))
+            os.replace(tmp, dest)
+            return
+        except urllib.error.HTTPError as error:
+            if error.code == 404 or attempt == attempts:
+                raise
+            reason = "HTTP %s" % error.code
+        except (urllib.error.URLError, http.client.HTTPException, TruncatedDownload, OSError) as error:
+            if attempt == attempts:
+                raise
+            reason = str(error)
+        print("download attempt %d/%d failed (%s); retrying in %.0f s" % (attempt, attempts, reason, delay))
+        sleep(delay)
+        delay *= 2
 
 
 def find_member_roots(tar, names):
@@ -85,10 +114,10 @@ def main(argv=None):
             if error.code == 404:
                 sys.stderr.write("release asset not found (HTTP 404): %s\n" % url)
                 return 4
-            sys.stderr.write("download failed: HTTP %s\n" % error.code)
+            sys.stderr.write("download failed after %d attempts: HTTP %s\n" % (DOWNLOAD_ATTEMPTS, error.code))
             return 1
-        except (urllib.error.URLError, OSError) as error:
-            sys.stderr.write("download failed: %s\n" % error)
+        except (urllib.error.URLError, http.client.HTTPException, TruncatedDownload, OSError) as error:
+            sys.stderr.write("download failed after %d attempts: %s\n" % (DOWNLOAD_ATTEMPTS, error))
             return 1
     else:
         print("cached %s" % tarball)
@@ -100,6 +129,10 @@ def main(argv=None):
         extract(tarball, vendor_version_dir)
     except (RuntimeError, tarfile.TarError, OSError) as error:
         sys.stderr.write("extract failed: %s\n" % error)
+        try:
+            os.remove(tarball)  # do not keep a truncated or corrupt download in the cache
+        except OSError:
+            pass
         return 1
     print("extracted %s" % vendor_version_dir)
     print("  archive bytes: %d" % os.path.getsize(tarball))

@@ -13,6 +13,8 @@ Everything below is optional and gates itself off when absent.
 | `MAC_BUILD_PROVISION_PROFILE_BASE64_2026` | reserved (macOS signed size) | base64 of the macOS `.provisionprofile`. |
 | `KEYCHAIN_PASSWORD` | same | any random string; a temporary keychain is created and deleted per job. |
 | `DISTRIBUTION_IDENTITY` | same | the signing identity name, e.g. `Apple Distribution: <team>`. |
+
+Without `UNITY_EMAIL` and `UNITY_PASSWORD` the `bench-unity` workflow's `preflight` job reports `licensed=false`, the ladder job is skipped with a notice, and the run stays green with no Unity rows.
 | `HARNESS_DISPATCH_TOKEN` | SDK repositories → `bench-release-report.yml` | fine-grained PAT or GitHub App token with `actions: write` on this repository, used by SDK release workflows to send `repository_dispatch` (`sdk-release`). |
 
 To create the base64 values locally (never commit the outputs):

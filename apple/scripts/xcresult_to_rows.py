@@ -107,7 +107,7 @@ def main():
                 rows.append({"schemaVersion": 1, "sdk": "apple", "platform": a.platform, "sdkVersion": a.sdk_version, "source": a.source,
                              "variant": a.variant, "scenario": a.scenario, "metric": metric_id, "unit": unit, "value": st["median"],
                              "samples": samples, "round": a.round, "position": a.position, "stats": st, "env": env,
-                             "run": {"id": a.run_id, "ts": ts, "workflow": a.workflow, "sha": a.sha}, "valid": True,
+                             "run": {"id": a.run_id, "ts": ts, "workflow": a.workflow, "sha": a.sha}, "valid": True, "origin": "platform",
                              "notes": "xcresult " + test_id + " " + metric.get("displayName", "")})
     out = sys.stdout if a.out == "-" else open(a.out, "w")
     for r in rows:

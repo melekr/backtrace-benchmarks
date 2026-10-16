@@ -19,12 +19,16 @@ local_flag=(); [ "$SOURCE" = "local" ] && local_flag=(--local-path "$LOCAL_PATH"
 
 # One rendered project per SDK version: build all variants, then run per-version lanes. Versions are interleaved
 # per round by run_ab_rounds.sh, which re-renders through the driver's prepare step.
+unsupported=" "   # space-separated versions without a published archive / that do not build (Bash 3.2: no associative arrays)
+is_unsupported() { case "$unsupported" in *" $1 "*) return 0;; *) return 1;; esac; }
 build_all() {
   for v in "${vlist[@]}"; do
-    "$driver" prepare --version "$v" --source "$SOURCE" ${local_flag[@]+"${local_flag[@]}"}
+    set +e; "$driver" prepare --version "$v" --source "$SOURCE" ${local_flag[@]+"${local_flag[@]}"}; rc=$?; set -e
+    [ $rc -eq 4 ] && { echo "unsupported: $v (no published archive)"; unsupported="$unsupported$v "; continue; }   # exit 1 (transient fetch failure) aborts below
+    [ $rc -eq 0 ] || exit $rc
     for variant in plain sdk sentinel; do
       set +e; "$driver" build --version "$v" --variant "$variant" ${dev[@]+"${dev[@]}"} --out "$OUT/raw/build-$v"; rc=$?; set -e
-      [ $rc -eq 4 ] && { echo "unsupported: $v"; break; }
+      [ $rc -eq 4 ] && { echo "unsupported: $v"; unsupported="$unsupported$v "; break; }
       [ $rc -eq 0 ] || exit $rc
       if has size && { [ "$variant" != "plain" ] || [ "$v" = "$newest" ]; }; then
         "$driver" size --version "$v" --variant "$variant" --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$OUT/raw/size-$v"
@@ -36,13 +40,17 @@ build_all() {
 run_all() {
   if has init; then
     "$repo/scripts/run_ab_rounds.sh" --sdk apple --driver "$driver" --parser "$parser" --versions "$VERSIONS" --plain --sentinel \
-      --rounds "$ROUNDS" --iterations "$ITERATIONS" --metric-set init --source "$SOURCE" ${udid:+--device "$udid"} --env "$ENV_JSON" --run-id "$RUN_ID" --out "$OUT/raw/init"
+      --rounds "$ROUNDS" --iterations "$ITERATIONS" --metric-set init --source "$SOURCE" ${udid:+--device "$udid"} --env "$ENV_JSON" --run-id "$RUN_ID" \
+      --warmup-launches 1 --out "$OUT/raw/init"   # XCTest's measure() runs one warm-up launch before the iterations
     cp "$OUT/raw/init/rows.jsonl" "$OUT/rows/init.jsonl"
   fi
   if has micro; then
     for v in "${vlist[@]}"; do
+      is_unsupported "$v" && { echo "micro: skipping unsupported $v"; continue; }
       d="$OUT/raw/micro/$v"; mkdir -p "$d"
-      "$driver" prepare --version "$v" --source "$SOURCE" ${local_flag[@]+"${local_flag[@]}"} >/dev/null
+      set +e; "$driver" prepare --version "$v" --source "$SOURCE" ${local_flag[@]+"${local_flag[@]}"} >/dev/null; rc=$?; set -e
+      [ $rc -eq 4 ] && { echo "micro: skipping unsupported $v"; continue; }
+      [ $rc -eq 0 ] || exit $rc
       # A failed pass is retried once, then recorded in report/lane-failures.md; the remaining cells still run.
       if run_with_retry "apple micro $v (sdk)" "$driver" run --metric-set micro --version "$v" --variant sdk ${dev[@]+"${dev[@]}"} --out "$d"; then
         python3 "$parser" "$d/micro.xcresult" --sdk-version "$v" --variant sdk --source "$SOURCE" --env "$ENV_JSON" --run-id "$RUN_ID" --out "$d/rows-platform.jsonl" || true

@@ -27,6 +27,7 @@
         "n": { "type": "integer", "minimum": 1 },
         "median": { "type": "number" }, "mean": { "type": "number" }, "mad": { "type": "number" },
         "p95": { "type": "number" }, "min": { "type": "number" }, "max": { "type": "number" }, "cov": { "type": "number" },
+        "rcov": { "type": "number", "description": "1.4826 * MAD / median (outlier-resistant dispersion)" },
         "sampleKind": { "enum": ["perLaunch", "perIteration", "measurementAverage", "exact"] }
       }
     },
@@ -52,6 +53,7 @@
       }
     },
     "valid": { "type": "boolean", "default": true },
+    "origin": { "enum": ["platform", "bench-result", "size", "tier0"], "description": "Which parser wrote the row; compare.py prefers 'platform' when two rows describe the same cell" },
     "notes": { "type": "string" }
   }
 }

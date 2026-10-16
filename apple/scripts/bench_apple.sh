@@ -59,7 +59,8 @@ case "$cmd" in
       set +e
       python3 "$here/fetch_xcframework.py" --version "$version" --artifacts-dir "$apple_dir/artifacts" --vendor-dir "$apple_dir/Vendor" >"$apple_dir/build/fetch-$version_id.log" 2>&1
       rc=$?; set -e
-      if [ $rc -ne 0 ]; then log "no usable XCFramework archive for $version"; tail -5 "$apple_dir/build/fetch-$version_id.log" >&2; exit 4; fi
+      if [ $rc -eq 4 ]; then log "no published XCFramework archive for $version (unsupported cell)"; tail -3 "$apple_dir/build/fetch-$version_id.log" >&2; exit 4; fi
+      if [ $rc -ne 0 ]; then log "fetching the XCFramework archive for $version failed (network?)"; tail -5 "$apple_dir/build/fetch-$version_id.log" >&2; exit 1; fi
       [ -d "$apple_dir/Vendor/$version/Backtrace.xcframework" ] || { log "archive for $version lacks Backtrace.xcframework"; exit 4; }
     fi
     # A build graph cached while the vendored frameworks were absent keeps failing with "no XCFramework found";
@@ -106,6 +107,9 @@ case "$cmd" in
         if [ -n "$container" ]; then rm -f "$container"/Documents/bt-bench-stages*.json "$container"/Documents/bench-result*.json; fi
         export BT_ITERATIONS="$iterations" TEST_RUNNER_BT_ITERATIONS="$iterations"
         [ -n "$crash" ] && export BT_BENCH_CRASH=1 TEST_RUNNER_BT_BENCH_CRASH=1
+        # xcodebuild refuses an existing result bundle (rc 64), which would break a retry of this pass.
+        rm -rf "$out/launch.xcresult"; rm -f "$out"/bt-bench-stages*.json "$out"/bench-result*.json
+        [ -f "$out/xcodebuild-launch.log" ] && mv "$out/xcodebuild-launch.log" "$out/xcodebuild-launch.prev.log"
         set +e
         xcodebuild test-without-building $(testrun_args "$variant") -destination "platform=iOS Simulator,id=$u" \
           -derivedDataPath "$dd" -only-testing:"BenchAppUITests-$variant" \
@@ -122,6 +126,8 @@ case "$cmd" in
         ;;
       micro)
         [ "$variant" != "plain" ] || { log "micro lane needs the sdk variant"; exit 1; }
+        rm -rf "$out/micro.xcresult"; rm -f "$out/bench-result-micro.json"
+        [ -f "$out/xcodebuild-micro.log" ] && mv "$out/xcodebuild-micro.log" "$out/xcodebuild-micro.prev.log"   # keep the failed attempt's log
         set +e
         xcodebuild test-without-building $(testrun_args "$variant") -destination "platform=iOS Simulator,id=$u" \
           -derivedDataPath "$dd" -only-testing:BenchUnitTests \

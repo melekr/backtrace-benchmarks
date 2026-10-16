@@ -76,6 +76,9 @@ def validate(th: Dict[str, Any], catalog: hc.MetricCatalog) -> List[str]:
         ci = comp.get("ci")
         if not (_is_pos_number(ci) and ci < 1):
             errs.append("comparison.ci must be in (0, 1)")
+        rr = comp.get("report_rel", 0.10)
+        if not (_is_pos_number(rr) and rr < 1):
+            errs.append("comparison.report_rel must be a fraction in (0, 1)")
 
     gates = th.get("gates")
     if not isinstance(gates, list) or not gates:
@@ -166,6 +169,11 @@ def cov_limit(metric_id: str, th: Dict[str, Any]) -> float:
         if group in cov and any(hc.glob_match_metric(g, metric_id) for g in globs):
             return float(cov[group])
     return float(cov["micro"])
+
+
+def report_rel(th: Dict[str, Any]) -> float:
+    """Relative band used as the threshold for rules without ``rel`` (warn/trend) and for the no-change test."""
+    return float((th.get("comparison") or {}).get("report_rel", 0.10))
 
 
 def min_samples(sample_kind: Optional[str], th: Dict[str, Any]) -> int:

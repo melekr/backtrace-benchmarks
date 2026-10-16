@@ -4,16 +4,18 @@
 version: 1
 noise:
   sentinel_max_rel: 0.05          # |sentinel vs newest| above this => job is 'noisy', no gates evaluated
-  cov_max:
+  cov_max:                        # robust CoV (1.4826*MAD/median) above this adds a "noisy" caveat to the row; the CI still decides
     ttid: 0.20                    # A2.*, C2.*, U7.player.ttid
     trace: 0.12                   # A1.*, C1.*, U1.*
     micro: 0.10                   # everything else timing
   rerun_failing_variant_once: true
-  min_samples: { perLaunch: 10, perIteration: 20, measurementAverage: 10, exact: 1 }
+  min_samples: { perLaunch: 10, perIteration: 20, measurementAverage: 5, exact: 1 }    # fewer => inconclusive (Microbenchmark averages 5 runs)
 comparison:
   bootstrap_resamples: 10000
   ci: 0.95
-  pairing: per_round_ratio_to_anchor   # median_variant(round) / median_anchor(round)
+  pairing: stratified_round_bootstrap  # informational; rounds are strata (both variants ran in each), samples resampled within rounds;
+                                       # statistic = geometric mean over rounds of median(head_r)/median(base_r)
+  report_rel: 0.10                     # warn/trend rules have no rel: this is their "large change" and "no change" band
 gates:
   - name: tier0-and-artifact-bytes
     match: ["A0.*", "C0.*", "U0.*", "A3.so_bytes.*", "U4.native_bytes.*"]

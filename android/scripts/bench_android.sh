@@ -89,8 +89,12 @@ case "$cmd" in
     ;;
   install)
     [ -f "$(apk_path)" ] || { log "no built APK for this cell; run build first"; exit 1; }
+    # A package left behind by an earlier job (restored emulator image) is signed with another debug key and makes
+    # `adb install` fail with INSTALL_FAILED_UPDATE_INCOMPATIBLE; always start from a clean slate.
+    adb uninstall "$app_id" >/dev/null 2>&1 || true
     adb install -r -g "$(apk_path)" >/dev/null
     if [ $with_tests -eq 1 ] && [ "$variant" != "plain" ]; then
+      for pkg in io.backtrace.bench.micro io.backtrace.bench.micro.test io.backtrace.bench.macro; do adb uninstall "$pkg" >/dev/null 2>&1 || true; done
       [ -f "$(micro_apk)" ] && adb install -r -t "$(micro_apk)" >/dev/null
       [ -f "$(macro_apk)" ] && adb install -r -t "$(macro_apk)" >/dev/null
     fi
@@ -107,6 +111,11 @@ case "$cmd" in
         adb shell settings put global transition_animation_scale 0 >/dev/null 2>&1 || true
         adb shell settings put global animator_duration_scale 0 >/dev/null 2>&1 || true
         adb logcat -c || true
+        # One uncollected warm-up launch: the first start after an install pays for dex optimisation and page-cache
+        # fills that no later launch sees, and it would otherwise dominate the dispersion of the round.
+        adb shell am force-stop "$app_id"; adb shell "rm -f $media" >/dev/null 2>&1 || true
+        adb shell am start -W -n "$app_id/$activity" ${extras[@]+"${extras[@]}"} > "$out/am-start-warmup.txt" 2>&1 || true
+        sleep 2
         ok=0
         for i in $(seq 1 "$iterations"); do
           adb shell am force-stop "$app_id"; adb shell "rm -f $media" >/dev/null 2>&1 || true

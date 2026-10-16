@@ -5,7 +5,7 @@
 #   run_ab_rounds.sh --sdk android|apple|unity --driver PATH/bench_<sdk>.sh --versions v1,v2
 #                    [--plain] [--sentinel] [--rounds 3] [--iterations N] [--metric-set init]
 #                    [--scenario default] [--source maven|xcframework|spm|openupm|local]
-#                    [--local-path DIR] [--parser PATH] [--expect-mock-requests N]
+#                    [--local-path DIR] [--parser PATH] [--expect-mock-requests N] [--warmup-launches N]
 #                    [--device ID] [--env FILE | --env-args "--agp 8.13.2 --jdk 17"] [--run-id ID]
 #                    --out DIR [--dry-run]
 #
@@ -15,7 +15,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 sdk="" driver="" versions="" plain=0 sentinel=0 rounds=3 iterations="" metric_set="init"
-scenario="default" source="" local_path="" parser="" expect_mock="" device="" env_args="" env_file=""
+scenario="default" source="" local_path="" parser="" expect_mock="" device="" env_args="" env_file="" warmups=0
 run_id="" out="" dry_run=0
 
 while [ $# -gt 0 ]; do
@@ -32,6 +32,7 @@ while [ $# -gt 0 ]; do
     --source) source="$2"; shift 2 ;;
     --local-path) local_path="$2"; shift 2 ;;
     --parser) parser="$2"; shift 2 ;;
+    --warmup-launches) warmups="$2"; shift 2 ;;
     --expect-mock-requests) expect_mock="$2"; shift 2 ;;
     --device) device="$2"; shift 2 ;;
     --env-args) env_args="$2"; shift 2 ;;
@@ -135,8 +136,13 @@ for ((r = 1; r <= rounds; r++)); do
       # The plain app has no SDK and must see zero mock requests; sdk/sentinel expect the configured count.
       if [ "$variant" = "plain" ]; then mock_flag=(--expect-mock-requests 0); else mock_flag=(--expect-mock-requests "$expect_mock"); fi
     fi
+    # Warm-up launches are dropped (--drop-first = the driver's warm-up count) and metrics the platform parser already
+    # emitted for this cell (e.g. the xcresult's C1.init.total / C2.launch_ms) are not duplicated.
+    bench_flags=()
+    [ "$warmups" -gt 0 ] && bench_flags+=(--drop-first "$warmups")
+    [ -s "$rdir/rows-platform.jsonl" ] && bench_flags+=(--exclude-metrics-in "$rdir/rows-platform.jsonl")
     if [ "$dry_run" = 1 ] || ls "$rdir"/bench-result*.json >/dev/null 2>&1 || ls "$rdir"/bt-bench-stages*.json >/dev/null 2>&1; then
-      run_cmd python3 "$here/parse_bench_result.py" "$rdir" "${common_parse[@]}" ${mock_flag[@]+"${mock_flag[@]}"} --out "$rdir/rows-bench.jsonl" || log "bench-result parser failed for $rdir"
+      run_cmd python3 "$here/parse_bench_result.py" "$rdir" "${common_parse[@]}" ${mock_flag[@]+"${mock_flag[@]}"} ${bench_flags[@]+"${bench_flags[@]}"} --out "$rdir/rows-bench.jsonl" || log "bench-result parser failed for $rdir"
     else
       log "no bench-result*.json in $rdir"
     fi
